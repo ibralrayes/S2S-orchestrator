@@ -1,0 +1,53 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  livekit-server:
+    image: livekit/livekit-server:v1.8
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit/livekit.yaml", "--dev"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "50000-50100:50000-50100/udp"
+    volumes:
+      - ./livekit-server/livekit.yaml:/etc/livekit/livekit.yaml:ro
+
+  agent:
+    build:
+      context: ./agent
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      livekit-server:
+        condition: service_started
+    env_file:
+      - ./.env
+    volumes:
+      - ./agent:/app
+    command: ["python", "agent.py", "start"]
+
+  token-server:
+    build:
+      context: ./token-server
+    restart: unless-stopped
+    depends_on:
+      livekit-server:
+        condition: service_started
+    env_file:
+      - ./.env
+    volumes:
+      - ./token-server:/app
+    ports:
+      - "${TOKEN_SERVER_PORT:-8080}:${TOKEN_SERVER_PORT:-8080}"
+    command: ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port ${TOKEN_SERVER_PORT:-8080}"]
