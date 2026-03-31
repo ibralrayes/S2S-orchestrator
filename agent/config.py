@@ -40,8 +40,6 @@ class AgentSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="AGENT_", extra="ignore")
 
     name: str = Field(default="nusuk-agent")
-    display_name: str = Field(default="Nusuk Agent")
-    identity_prefix: str = Field(default="nusuk")
     system_prompt: str = Field(
         default="You are a concise, helpful Arabic-first voice assistant."
     )
@@ -50,5 +48,16 @@ class AgentSettings(BaseSettings):
     )
     use_turn_detector: bool = Field(default=False)
     vad_activation_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    allow_interruptions: bool = Field(default=True)
+    discard_audio_if_uninterruptible: bool = Field(default=True)
+    min_interruption_duration: float = Field(default=0.5, ge=0.0)
+    min_interruption_words: int = Field(default=0, ge=0)
     min_endpointing_delay: float = Field(default=0.5, ge=0.0)
     max_endpointing_delay: float = Field(default=5.0, ge=0.0)
+    false_interruption_timeout: float | None = Field(default=2.0, ge=0.0)
+    resume_false_interruption: bool = Field(default=True)
+    min_consecutive_speech_delay: float = Field(default=0.0, ge=0.0)
+    use_tts_aligned_transcript: bool = Field(default=False)
+    participant_identity: str | None = Field(default=None)
+    close_on_disconnect: bool = Field(default=True)
+    delete_room_on_close: bool = Field(default=False)
