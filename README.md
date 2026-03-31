@@ -188,6 +188,7 @@ Key behaviors:
 
 - preloads Silero VAD once per worker process
 - starts a LiveKit `AgentSession` per room
+- starts the session with explicit `RoomOptions` instead of relying on implicit defaults
 - overrides `stt_node`, `llm_node`, and `tts_node`
 - relies on LiveKit `AgentSession` for session lifecycle and conversation history
 - sends an initial Arabic greeting after session startup
@@ -197,6 +198,8 @@ Current implementation details:
 - STT is turn-based, not streaming
 - LLM supports streamed token output from an OpenAI-compatible SSE endpoint
 - TTS currently buffers the full text response before synthesis
+- interruption and room I/O behavior are now surfaced through environment config
+- stable room I/O defaults are hard-coded to keep `.env` smaller: text/audio input enabled, text/audio output enabled, 24 kHz mono input, 50 ms frames, pre-connect audio enabled, synced text output
 
 ### Token server
 
@@ -307,14 +310,35 @@ For local Docker development, the defaults are:
 ### Agent behavior
 
 - `AGENT_NAME`
-- `AGENT_DISPLAY_NAME`
-- `AGENT_IDENTITY_PREFIX`
 - `AGENT_SYSTEM_PROMPT`
 - `AGENT_GREETING`
 - `AGENT_USE_TURN_DETECTOR`
 - `AGENT_VAD_ACTIVATION_THRESHOLD`
+- `AGENT_ALLOW_INTERRUPTIONS`
+- `AGENT_DISCARD_AUDIO_IF_UNINTERRUPTIBLE`
+- `AGENT_MIN_INTERRUPTION_DURATION`
+- `AGENT_MIN_INTERRUPTION_WORDS`
 - `AGENT_MIN_ENDPOINTING_DELAY`
 - `AGENT_MAX_ENDPOINTING_DELAY`
+- `AGENT_FALSE_INTERRUPTION_TIMEOUT`
+- `AGENT_RESUME_FALSE_INTERRUPTION`
+- `AGENT_MIN_CONSECUTIVE_SPEECH_DELAY`
+- `AGENT_USE_TTS_ALIGNED_TRANSCRIPT`
+- `AGENT_PARTICIPANT_IDENTITY`
+- `AGENT_CLOSE_ON_DISCONNECT`
+- `AGENT_DELETE_ROOM_ON_CLOSE`
+
+The following room I/O defaults are hard-coded in `agent/agent.py` instead of exposed as env vars:
+
+- text input enabled
+- audio input enabled
+- audio output enabled
+- text output enabled
+- audio input sample rate `24000`
+- audio input channels `1`
+- audio input frame size `50 ms`
+- pre-connect audio enabled with `3.0 s` timeout
+- synced text transcription enabled with speed factor `1.0`
 
 ### External services
 
