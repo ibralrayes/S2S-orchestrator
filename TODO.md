@@ -6,6 +6,8 @@
 - [x] Implement token generation service
 - [x] Implement agent worker skeleton with VAD prewarm and session hooks
 - [x] Add first-pass external STT, LLM, and TTS adapter modules
+- [x] Make LiveKit room I/O options explicit in the agent
+- [x] Surface interruption and turn-handling controls in config
 - [ ] Confirm the exact ASR endpoint contract and audio format requirements
 - [ ] Confirm the exact TTS endpoint contract and streaming capabilities
 - [ ] Confirm the exact LLM streaming format and tool-calling support
