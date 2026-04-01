@@ -166,6 +166,17 @@ def _extract_text(value: object) -> str:
     return ""
 
 
+def _resolve_user_identity(ctx: JobContext, agent_settings: AgentSettings) -> str | None:
+    if agent_settings.participant_identity:
+        return agent_settings.participant_identity
+
+    remote_participants = list(ctx.room.remote_participants.values())
+    if remote_participants:
+        return remote_participants[0].identity
+
+    return None
+
+
 @server.rtc_session(agent_name=AgentSettings().name)
 async def entrypoint(ctx: JobContext) -> None:
     agent_settings = AgentSettings()
@@ -176,7 +187,12 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
 
     stt_adapter = CustomSTTAdapter(stt_settings)
-    llm_adapter = CustomLLMAdapter(llm_settings, agent_settings)
+    llm_adapter = CustomLLMAdapter(
+        llm_settings,
+        agent_settings,
+        session_id=ctx.room.name,
+        user_id=_resolve_user_identity(ctx, agent_settings),
+    )
     tts_adapter = CustomTTSAdapter(tts_settings)
 
     agent = NusukAgent(
