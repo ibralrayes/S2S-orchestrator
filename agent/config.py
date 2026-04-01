@@ -18,7 +18,12 @@ class LLMSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="CUSTOM_LLM_", extra="ignore")
 
     url: str = Field(..., description="External LLM base URL or chat endpoint")
-    model: str = Field(..., description="LLM model name")
+    provider: str = Field(default="openai", description="openai or nusuk")
+    model: str = Field(default="placeholder", description="LLM model name when the provider uses one")
+    access_token: str | None = Field(default=None, description="Bearer token for the LLM API")
+    language: str = Field(default="ar", description="Language hint for the LLM service")
+    include_metadata: bool = Field(default=True, description="Request metadata when the provider supports it")
+    tool: str = Field(default="Knowledge", description="Nusuk tool name")
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     max_tokens: int = Field(default=256, ge=1)
     timeout_seconds: float = Field(default=60.0, ge=1)
