@@ -83,7 +83,7 @@ S2S-orchestrator/
 │   ├── config.py               # Pydantic settings for STT/LLM/TTS/agent config
 │   └── plugins/
 │       ├── custom_stt.py       # Whisper/OpenAI-style transcription adapter
-│       ├── custom_llm.py       # OpenAI-compatible chat completions adapter
+│       ├── custom_llm.py       # OpenAI-style and Nusuk streaming chat adapter
 │       └── custom_tts.py       # Speech synthesis adapter
 └── token-server/
     ├── Dockerfile
@@ -196,7 +196,7 @@ Key behaviors:
 Current implementation details:
 
 - STT is turn-based, not streaming
-- LLM supports streamed token output from an OpenAI-compatible SSE endpoint
+- LLM supports streamed token output from either an OpenAI-compatible SSE endpoint or Nusuk `/chat/stream`
 - TTS currently buffers the full text response before synthesis
 - interruption and room I/O behavior are now surfaced through environment config
 - stable room I/O defaults are hard-coded to keep `.env` smaller: text/audio input enabled, text/audio output enabled, 24 kHz mono input, 50 ms frames, pre-connect audio enabled, synced text output
@@ -254,16 +254,24 @@ The adapter also accepts `transcript` or `transcription` as fallback response ke
 
 File: `agent/plugins/custom_llm.py`
 
-Expected request:
+Supported provider modes:
 
+- `CUSTOM_LLM_PROVIDER=openai`
 - `POST` to `CUSTOM_LLM_URL + /chat/completions` unless the URL already ends with `/chat/completions`
 - OpenAI-compatible JSON payload
 - `stream=true`
+
+- `CUSTOM_LLM_PROVIDER=nusuk`
+- `POST` to `CUSTOM_LLM_URL + /chat/stream` unless the URL already ends with `/chat` or `/chat/stream`
+- JSON body with `query`, `session_id`, `language`, `include_metadata`, and `tool`
+- `user_id` is sent when a linked LiveKit participant identity is available
+- `session_id` is mapped from the LiveKit room name
 
 Expected streaming response:
 
 - SSE `data:` lines
 - OpenAI-style delta chunks under `choices[0].delta.content`
+- or Nusuk delta chunks under `delta`
 
 ### TTS adapter
 
@@ -353,10 +361,17 @@ STT:
 LLM:
 
 - `CUSTOM_LLM_URL`
+- `CUSTOM_LLM_PROVIDER`
 - `CUSTOM_LLM_MODEL`
+- `CUSTOM_LLM_ACCESS_TOKEN`
+- `CUSTOM_LLM_LANGUAGE`
+- `CUSTOM_LLM_INCLUDE_METADATA`
+- `CUSTOM_LLM_TOOL`
 - `CUSTOM_LLM_TEMPERATURE`
 - `CUSTOM_LLM_MAX_TOKENS`
 - `CUSTOM_LLM_TIMEOUT_SECONDS`
+
+`CUSTOM_LLM_MODEL` is currently unused when `CUSTOM_LLM_PROVIDER=nusuk`.
 
 TTS:
 
@@ -394,7 +409,7 @@ make down
 - STT is currently single-turn rather than incremental streaming.
 - TTS currently starts after the full LLM response is collected.
 - Session history is stored in memory only and is cleared when a room ends.
-- This repo has not yet been exercised end-to-end against the real ASR, LLM, and TTS services.
+- The Nusuk chat API has been validated directly, but the full LiveKit path still needs an end-to-end run.
 
 ## Recommended next steps
 
