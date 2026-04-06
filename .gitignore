@@ -13,3 +13,7 @@ demo/node_modules/
 demo/.next/
 demo/.env.local
 
+# Local-only AI context files (not for repo)
+CLAUDE.MD
+AGENT.MD
+.ignore
