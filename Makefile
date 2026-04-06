@@ -1,6 +1,6 @@
 COMPOSE=docker compose
 
-.PHONY: up down logs build ps validate
+.PHONY: up down logs build ps validate demo demo-down
 
 up:
 	$(COMPOSE) up --build
@@ -19,4 +19,10 @@ ps:
 
 validate:
 	python -m compileall agent token-server
+
+demo:
+	$(COMPOSE) --profile demo up --build
+
+demo-down:
+	$(COMPOSE) --profile demo down --remove-orphans
 

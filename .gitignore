@@ -9,3 +9,7 @@ __pycache__/
 dist/
 build/
 
+demo/node_modules/
+demo/.next/
+demo/.env.local
+
