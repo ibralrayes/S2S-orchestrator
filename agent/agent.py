@@ -1,19 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import AsyncIterable
 
-from livekit import agents, rtc
-from livekit.agents import Agent, AgentServer, AgentSession, JobContext, ModelSettings, cli, llm
-from livekit.agents.llm import ChatContext
-from livekit.agents.stt import SpeechData, SpeechEvent, SpeechEventType
+from livekit import agents
+from livekit.agents import Agent, AgentServer, AgentSession, JobContext, cli, stt
 from livekit.agents.voice import room_io
 from livekit.plugins import silero
 
 from config import AgentSettings, LLMSettings, STTSettings, TTSSettings
-from plugins.custom_llm import CustomLLMAdapter
+from plugins.custom_llm import CustomLLM
 from plugins.custom_stt import CustomSTTAdapter
-from plugins.custom_tts import CustomTTSAdapter
+from plugins.custom_tts import CustomTTS
 
 try:
     from livekit.plugins.turn_detector.multilingual import MultilingualModel
@@ -22,14 +20,15 @@ except ImportError:  # pragma: no cover - optional dependency surface
 
 
 logger = logging.getLogger("nusuk-agent")
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
+logging.getLogger("livekit.agents").setLevel(logging.DEBUG)
 
 server = AgentServer()
 
 ROOM_TEXT_INPUT_ENABLED = False
 ROOM_AUDIO_INPUT_ENABLED = True
 ROOM_AUDIO_OUTPUT_ENABLED = True
-ROOM_TEXT_OUTPUT_ENABLED = False
+ROOM_TEXT_OUTPUT_ENABLED = True
 ROOM_INPUT_SAMPLE_RATE = 24000
 ROOM_INPUT_NUM_CHANNELS = 1
 ROOM_INPUT_FRAME_SIZE_MS = 50
@@ -54,62 +53,8 @@ server.setup_fnc = prewarm
 
 
 class NusukAgent(Agent):
-    def __init__(
-        self,
-        *,
-        agent_settings: AgentSettings,
-        stt_adapter: CustomSTTAdapter,
-        llm_adapter: CustomLLMAdapter,
-        tts_adapter: CustomTTSAdapter,
-    ) -> None:
+    def __init__(self, *, agent_settings: AgentSettings) -> None:
         super().__init__(instructions=agent_settings.system_prompt)
-        self.agent_settings = agent_settings
-        self.stt_adapter = stt_adapter
-        self.llm_adapter = llm_adapter
-        self.tts_adapter = tts_adapter
-
-    async def stt_node(
-        self,
-        audio: AsyncIterable[rtc.AudioFrame],
-        model_settings: ModelSettings,
-    ) -> AsyncIterable[SpeechEvent]:
-        del model_settings
-        frames = [frame async for frame in audio]
-        result = await self.stt_adapter.transcribe_frames(frames)
-        data = SpeechData(language=result.language, text=result.text)
-        yield SpeechEvent(type=SpeechEventType.START_OF_SPEECH, request_id=result.request_id)
-        yield SpeechEvent(
-            type=SpeechEventType.FINAL_TRANSCRIPT,
-            request_id=result.request_id,
-            alternatives=[data],
-        )
-        yield SpeechEvent(
-            type=SpeechEventType.END_OF_SPEECH,
-            request_id=result.request_id,
-            alternatives=[data],
-        )
-
-    async def llm_node(
-        self,
-        chat_ctx: ChatContext,
-        tools: list[llm.Tool],
-        model_settings: ModelSettings,
-    ) -> AsyncIterable[str]:
-        del tools, model_settings
-        async for chunk in self.llm_adapter.stream_chat(chat_ctx):
-            yield chunk
-
-    async def tts_node(
-        self,
-        text: AsyncIterable[str],
-        model_settings: ModelSettings,
-    ) -> AsyncIterable[rtc.AudioFrame]:
-        del model_settings
-        buffered_text = []
-        async for chunk in text:
-            buffered_text.append(chunk)
-        async for frame in self.tts_adapter.synthesize("".join(buffered_text)):
-            yield frame
 
 
 def _build_room_options(
@@ -187,22 +132,21 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
 
     stt_adapter = CustomSTTAdapter(stt_settings)
-    llm_adapter = CustomLLMAdapter(
+    streaming_stt = stt.StreamAdapter(stt=stt_adapter, vad=ctx.proc.userdata["vad"])
+    llm_provider = CustomLLM(
         llm_settings,
         agent_settings,
         session_id=ctx.room.name,
         user_id=_resolve_user_identity(ctx, agent_settings),
     )
-    tts_adapter = CustomTTSAdapter(tts_settings)
+    tts_provider = CustomTTS(tts_settings)
 
-    agent = NusukAgent(
-        agent_settings=agent_settings,
-        stt_adapter=stt_adapter,
-        llm_adapter=llm_adapter,
-        tts_adapter=tts_adapter,
-    )
+    agent = NusukAgent(agent_settings=agent_settings)
 
     session = AgentSession(
+        stt=streaming_stt,
+        llm=llm_provider,
+        tts=tts_provider,
         vad=ctx.proc.userdata["vad"],
         turn_detection=ctx.proc.userdata.get("turn_detection"),
         allow_interruptions=agent_settings.allow_interruptions,
@@ -244,18 +188,21 @@ async def entrypoint(ctx: JobContext) -> None:
                 content,
             )
 
+    disconnected = asyncio.Event()
+    ctx.room.on("disconnected")(lambda *_: disconnected.set())
+
     try:
         await session.start(
             room=ctx.room,
             agent=agent,
             room_options=_build_room_options(agent_settings, tts_settings),
         )
-        await session.say(agent_settings.greeting)
-        await ctx.wait_for_shutdown()
+        await disconnected.wait()
     finally:
+        await streaming_stt.aclose()
         await stt_adapter.aclose()
-        await llm_adapter.aclose()
-        await tts_adapter.aclose()
+        await llm_provider.aclose()
+        await tts_provider.aclose()
 
 
 if __name__ == "__main__":
