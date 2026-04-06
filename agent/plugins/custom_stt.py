@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import io
+import logging
 import uuid
 import wave
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 from livekit import rtc
+from livekit.agents import stt, utils
 
 from config import STTSettings
+
+logger = logging.getLogger("nusuk-agent.stt")
 
 
 @dataclass(slots=True)
@@ -18,38 +23,119 @@ class STTResult:
     language: str
 
 
-class CustomSTTAdapter:
-    """Small HTTP adapter for Whisper/OpenAI-style transcription endpoints."""
+class CustomSTTAdapter(stt.STT):
+    """HTTP adapter for local ASR, OpenAI-style, and Nusuk transcription endpoints."""
 
     def __init__(self, settings: STTSettings) -> None:
+        super().__init__(
+            capabilities=stt.STTCapabilities(
+                streaming=False,
+                interim_results=False,
+                diarization=False,
+            )
+        )
         self.settings = settings
         self._client = httpx.AsyncClient(timeout=settings.timeout_seconds)
+
+    @property
+    def model(self) -> str:
+        return self.settings.model
+
+    @property
+    def provider(self) -> str:
+        return self.settings.provider
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
+    async def _recognize_impl(
+        self,
+        buffer: utils.AudioBuffer,
+        *,
+        language: Any = None,
+        conn_options: Any = None,
+    ) -> stt.SpeechEvent:
+        del conn_options
+        frames = buffer if isinstance(buffer, list) else [buffer]
+        result = await self.transcribe_frames(frames)
+        transcript_language = language if isinstance(language, str) and language else result.language
+        speech_data = stt.SpeechData(language=transcript_language, text=result.text)
+        return stt.SpeechEvent(
+            type=stt.SpeechEventType.FINAL_TRANSCRIPT,
+            request_id=result.request_id,
+            alternatives=[speech_data],
+        )
+
     async def transcribe_frames(self, frames: list[rtc.AudioFrame]) -> STTResult:
         request_id = str(uuid.uuid4())
+        logger.info("request_id=%s stt_start frames=%s", request_id, len(frames))
         wav_bytes = frames_to_wav_bytes(
             frames, target_sample_rate=self.settings.target_sample_rate
         )
         files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
-        data = {"model": self.settings.model, "language": self.settings.language}
-        response = await self._client.post(self.settings.url, data=data, files=files)
+        provider = self.settings.provider.strip().lower()
+        data = _request_form_data(self.settings, provider)
+        response = await self._client.post(
+            _transcribe_url(self.settings.url, provider),
+            data=data,
+            files=files,
+            headers=_bearer_headers(self.settings),
+        )
         response.raise_for_status()
 
         payload = response.json()
         text = (
-            payload.get("text")
+            payload.get("transcription_text")
+            or payload.get("text")
             or payload.get("transcript")
             or payload.get("transcription")
             or ""
         )
+        logger.info(
+            "request_id=%s stt_done provider=%s text=%s",
+            request_id,
+            self.settings.provider,
+            text.strip(),
+        )
         return STTResult(
             text=text.strip(),
-            request_id=payload.get("request_id", request_id),
+            request_id=_response_request_id(payload, request_id),
             language=payload.get("language", self.settings.language),
         )
+
+
+def _request_form_data(settings: STTSettings, provider: str) -> dict[str, str]:
+    if provider in {"nusuk", "local_api"}:
+        return {}
+    return {
+        "model": settings.model,
+        "language": settings.language,
+    }
+
+
+def _transcribe_url(url: str, provider: str) -> str:
+    normalized = url.rstrip("/")
+    if provider == "local_api" and not normalized.endswith("/api/transcribe"):
+        return normalized + "/api/transcribe/"
+    if provider == "nusuk" and not normalized.endswith("/transcribe"):
+        return normalized + "/transcribe"
+    return normalized
+
+
+def _bearer_headers(settings: STTSettings) -> dict[str, str]:
+    if not settings.access_token:
+        return {}
+    return {"Authorization": f"Bearer {settings.access_token}"}
+
+
+def _response_request_id(payload: dict[str, object], fallback: str) -> str:
+    transcription_id = payload.get("transcription_id")
+    if transcription_id is not None:
+        return str(transcription_id)
+    request_id = payload.get("request_id")
+    if isinstance(request_id, str) and request_id:
+        return request_id
+    return fallback
 
 
 def frames_to_wav_bytes(
@@ -81,4 +167,3 @@ def frames_to_wav_bytes(
         wav_file.setframerate(sample_rate)
         wav_file.writeframes(pcm_bytes)
     return wav_buffer.getvalue()
-
