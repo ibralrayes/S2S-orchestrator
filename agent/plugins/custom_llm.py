@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+import logging
+import uuid
 
 import httpx
-from livekit.agents import llm
+from livekit.agents import DEFAULT_API_CONNECT_OPTIONS, APIConnectOptions, NOT_GIVEN, llm
 
 from config import AgentSettings, LLMSettings
 
+logger = logging.getLogger("nusuk-agent.llm")
 
-class CustomLLMAdapter:
-    """Streaming chat adapter for OpenAI-style and Nusuk APIs."""
+
+class CustomLLM(llm.LLM):
+    """LiveKit-native LLM provider backed by Groq/OpenAI-style or Nusuk APIs."""
 
     def __init__(
         self,
@@ -20,106 +23,187 @@ class CustomLLMAdapter:
         session_id: str,
         user_id: str | None = None,
     ) -> None:
+        super().__init__()
         self.settings = settings
         self.agent_settings = agent_settings
         self.session_id = session_id
         self.user_id = user_id
         self._client = httpx.AsyncClient(timeout=settings.timeout_seconds)
 
+    @property
+    def model(self) -> str:
+        return self.settings.model
+
+    @property
+    def provider(self) -> str:
+        return self.settings.provider
+
+    def chat(
+        self,
+        *,
+        chat_ctx: llm.ChatContext,
+        tools: list[llm.Tool] | None = None,
+        conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
+        parallel_tool_calls=NOT_GIVEN,
+        tool_choice=NOT_GIVEN,
+        extra_kwargs=NOT_GIVEN,
+    ) -> llm.LLMStream:
+        del parallel_tool_calls, tool_choice, extra_kwargs
+        return CustomLLMStream(
+            self,
+            chat_ctx=chat_ctx,
+            tools=tools or [],
+            conn_options=conn_options,
+        )
+
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def stream_chat(self, chat_ctx: llm.ChatContext) -> AsyncIterator[str]:
-        provider = self.settings.provider.strip().lower()
+
+class CustomLLMStream(llm.LLMStream):
+    def __init__(
+        self,
+        llm_provider: CustomLLM,
+        *,
+        chat_ctx: llm.ChatContext,
+        tools: list[llm.Tool],
+        conn_options: APIConnectOptions,
+    ) -> None:
+        super().__init__(
+            llm=llm_provider,
+            chat_ctx=chat_ctx,
+            tools=tools,
+            conn_options=conn_options,
+        )
+        self._provider = llm_provider
+
+    async def _run(self) -> None:
+        provider = self._provider.settings.provider.strip().lower()
         if provider == "nusuk":
-            async for chunk in self._stream_nusuk(chat_ctx):
-                yield chunk
+            await self._run_nusuk()
             return
 
-        async for chunk in self._stream_openai(chat_ctx):
-            yield chunk
+        await self._run_openai()
 
-    async def _stream_openai(self, chat_ctx: llm.ChatContext) -> AsyncIterator[str]:
-        messages, _ = chat_ctx.to_provider_format("openai")
+    async def _run_openai(self) -> None:
+        messages, _ = self.chat_ctx.to_provider_format("openai")
         if not any(message.get("role") == "system" for message in messages):
             messages.insert(
                 0,
                 {
                     "role": "system",
-                    "content": self.agent_settings.system_prompt,
+                    "content": self._provider.agent_settings.system_prompt,
                 },
             )
 
         payload = {
-            "model": self.settings.model,
+            "model": self._provider.settings.model,
             "messages": messages,
             "stream": True,
-            "temperature": self.settings.temperature,
-            "max_tokens": self.settings.max_tokens,
+            "reasoning_effort": "none",
+            "temperature": self._provider.settings.temperature,
+            "max_tokens": self._provider.settings.max_tokens,
         }
 
-        async with self._client.stream(
+        request_id = str(uuid.uuid4())
+        reasoning_filter = ReasoningStreamFilter()
+
+        logger.info("llm_start provider=%s", self._provider.settings.provider)
+        async with self._provider._client.stream(
             "POST",
-            _openai_chat_url(self.settings.url),
+            _openai_chat_url(self._provider.settings.url),
             json=payload,
-            headers=_bearer_headers(self.settings),
+            headers=_bearer_headers(self._provider.settings),
         ) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():
                 if not line or not line.startswith("data:"):
                     continue
+
                 data = line.removeprefix("data:").strip()
                 if data == "[DONE]":
                     break
+
                 try:
                     event = json.loads(data)
                 except json.JSONDecodeError:
                     continue
 
+                request_id = event.get("id") or request_id
                 delta = (
                     event.get("choices", [{}])[0]
                     .get("delta", {})
                     .get("content")
                 )
-                if delta:
-                    yield delta
+                if not delta:
+                    continue
 
-    async def _stream_nusuk(self, chat_ctx: llm.ChatContext) -> AsyncIterator[str]:
-        query = _latest_user_message(chat_ctx)
+                filtered = reasoning_filter.push(delta)
+                if not filtered:
+                    continue
+
+                self._event_ch.send_nowait(
+                    llm.ChatChunk(
+                        id=request_id,
+                        delta=llm.ChoiceDelta(
+                            role="assistant",
+                            content=filtered,
+                        ),
+                    )
+                )
+        logger.info("llm_done provider=%s", self._provider.settings.provider)
+
+    async def _run_nusuk(self) -> None:
+        query = _latest_user_message(self.chat_ctx)
         if not query:
             return
 
         payload = {
             "query": query,
-            "session_id": self.session_id,
-            "language": self.settings.language,
-            "include_metadata": self.settings.include_metadata,
-            "tool": self.settings.tool,
+            "session_id": self._provider.session_id,
+            "language": self._provider.settings.language,
+            "include_metadata": self._provider.settings.include_metadata,
+            "tool": self._provider.settings.tool,
         }
-        if self.user_id:
-            payload["user_id"] = self.user_id
+        if self._provider.user_id:
+            payload["user_id"] = self._provider.user_id
 
-        async with self._client.stream(
+        request_id = str(uuid.uuid4())
+        logger.info("llm_start provider=%s", self._provider.settings.provider)
+        async with self._provider._client.stream(
             "POST",
-            _nusuk_stream_url(self.settings.url),
+            _nusuk_stream_url(self._provider.settings.url),
             json=payload,
-            headers=_bearer_headers(self.settings),
+            headers=_bearer_headers(self._provider.settings),
         ) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():
                 if not line or not line.startswith("data:"):
                     continue
+
                 data = line.removeprefix("data:").strip()
                 if data == "[DONE]":
                     break
+
                 try:
                     event = json.loads(data)
                 except json.JSONDecodeError:
                     continue
 
                 delta = event.get("delta")
-                if isinstance(delta, str) and delta:
-                    yield delta
+                if not isinstance(delta, str) or not delta:
+                    continue
+
+                self._event_ch.send_nowait(
+                    llm.ChatChunk(
+                        id=request_id,
+                        delta=llm.ChoiceDelta(
+                            role="assistant",
+                            content=delta,
+                        ),
+                    )
+                )
+        logger.info("llm_done provider=%s", self._provider.settings.provider)
 
 
 def _openai_chat_url(url: str) -> str:
@@ -168,3 +252,38 @@ def _message_text(content: object) -> str:
                     parts.append(text)
         return " ".join(parts)
     return ""
+
+
+class ReasoningStreamFilter:
+    def __init__(self) -> None:
+        self._raw = ""
+        self._visible_len = 0
+
+    def push(self, chunk: str) -> str:
+        self._raw += chunk
+        visible = _visible_text(self._raw)
+        if len(visible) <= self._visible_len:
+            return ""
+        delta = visible[self._visible_len :]
+        self._visible_len = len(visible)
+        return delta
+
+
+def _visible_text(text: str) -> str:
+    cleaned = text
+    while True:
+        start = cleaned.find("<think>")
+        if start == -1:
+            break
+        end = cleaned.find("</think>", start + len("<think>"))
+        if end == -1:
+            cleaned = cleaned[:start]
+            break
+        cleaned = cleaned[:start] + cleaned[end + len("</think>") :]
+
+    for suffix in ("<think>", "<think", "<thin", "<thi", "<th", "<t", "<"):
+        if cleaned.endswith(suffix):
+            cleaned = cleaned[: -len(suffix)]
+            break
+
+    return cleaned
