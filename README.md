@@ -85,10 +85,14 @@ S2S-orchestrator/
 │       ├── custom_stt.py       # Whisper/OpenAI-style transcription adapter
 │       ├── custom_llm.py       # OpenAI-style and Nusuk streaming chat adapter
 │       └── custom_tts.py       # Speech synthesis adapter
-└── token-server/
+├── token-server/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── server.py               # JWT token service for LiveKit clients
+└── demo/                       # Optional demo frontend (docker compose --profile demo)
     ├── Dockerfile
-    ├── requirements.txt
-    └── server.py               # JWT token service for LiveKit clients
+    ├── app-config.ts           # Branding and feature toggles
+    └── app/api/token/route.ts  # Next.js token endpoint for the demo UI
 ```
 
 ## How the system works
@@ -124,6 +128,8 @@ Edit `.env` and set:
 - the external `CUSTOM_STT_URL`
 - the external `CUSTOM_LLM_URL`
 - the external `CUSTOM_TTS_URL`
+
+The current defaults assume Nusuk for STT and Groq for the LLM. Override them if you want another provider.
 
 ### 2. Start the stack
 
@@ -161,6 +167,24 @@ The frontend should:
 - call `GET /token`
 - use the returned `url`
 - connect to the returned `room` with the returned `token`
+
+### 5. Run the demo frontend (optional)
+
+A pre-configured voice agent demo UI is included in `demo/`. Start it alongside the stack:
+
+```bash
+make demo
+```
+
+Or directly:
+
+```bash
+docker compose --profile demo up --build
+```
+
+Open `http://localhost:3000`, click "Start conversation", and speak. The agent will respond in Arabic.
+
+The demo uses LiveKit's open-source [Agent Starter React](https://github.com/livekit-examples/agent-starter-react) template with the Agents UI component library.
 
 ## Services
 
@@ -231,14 +255,22 @@ These are the assumptions the current code makes about the external services.
 
 File: `agent/plugins/custom_stt.py`
 
-Expected request:
+Supported provider modes:
 
+- `CUSTOM_STT_PROVIDER=openai`
 - `POST` to `CUSTOM_STT_URL`
 - `multipart/form-data`
 - fields:
   - `file`: WAV audio
   - `model`
   - `language`
+
+- `CUSTOM_STT_PROVIDER=nusuk`
+- `POST` to `CUSTOM_STT_URL + /transcribe` unless the URL already ends with `/transcribe`
+- `Authorization: Bearer <token>`
+- `multipart/form-data`
+- fields:
+  - `file`: WAV audio
 
 Expected response JSON:
 
@@ -248,7 +280,7 @@ Expected response JSON:
 }
 ```
 
-The adapter also accepts `transcript` or `transcription` as fallback response keys.
+The adapter also accepts Nusuk-style `transcription_text`, plus `transcript` or `transcription` as fallback response keys.
 
 ### LLM adapter
 
@@ -277,9 +309,19 @@ Expected streaming response:
 
 File: `agent/plugins/custom_tts.py`
 
-Expected request:
+Supported provider modes today:
 
+- `CUSTOM_TTS_PROVIDER=local_api`
+- `POST` to `CUSTOM_TTS_URL + /api/synthesize` unless the URL already ends with `/api/synthesize`
+- optional `Authorization: Bearer <token>`
+- JSON body with:
+  - `text`
+  - `output_format`
+  - `sample_rate`
+
+- `CUSTOM_TTS_PROVIDER=generic`
 - `POST` to `CUSTOM_TTS_URL`
+- optional `Authorization: Bearer <token>`
 - JSON body with:
   - `model`
   - `voice`
@@ -353,10 +395,14 @@ The following room I/O defaults are hard-coded in `agent/agent.py` instead of ex
 STT:
 
 - `CUSTOM_STT_URL`
+- `CUSTOM_STT_PROVIDER`
 - `CUSTOM_STT_MODEL`
+- `CUSTOM_STT_ACCESS_TOKEN`
 - `CUSTOM_STT_LANGUAGE`
 - `CUSTOM_STT_TIMEOUT_SECONDS`
 - `CUSTOM_STT_TARGET_SAMPLE_RATE`
+
+`CUSTOM_STT_MODEL` is currently unused when `CUSTOM_STT_PROVIDER=nusuk`.
 
 LLM:
 
@@ -376,6 +422,8 @@ LLM:
 TTS:
 
 - `CUSTOM_TTS_URL`
+- `CUSTOM_TTS_PROVIDER`
+- `CUSTOM_TTS_ACCESS_TOKEN`
 - `CUSTOM_TTS_MODEL`
 - `CUSTOM_TTS_VOICE`
 - `CUSTOM_TTS_SAMPLE_RATE`
