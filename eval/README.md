@@ -11,8 +11,6 @@ Tools for benchmarking the S2S pipeline latency, both in isolation (direct API c
 
 ## Test data
 
-Pre-converted WAV files are in `testdata/`. All files are 16 kHz mono int16 PCM, originally float32 (converted via ffmpeg).
-
 ```
 testdata/
 ├── chunk_0000.wav  (11.36s)
@@ -21,6 +19,13 @@ testdata/
 ...
 └── chunk_0019.wav  (12.45s)
 ```
+
+Both scripts accept **any WAV format** — float32, float64, int32, int8, and int16 PCM are all handled automatically via an in-memory `normalize_wav()` conversion using numpy. No manual pre-conversion needed.
+
+The constraint is a Python tooling limitation, not a LiveKit server limitation:
+- `wave` module only reads int16 PCM (format 1)
+- `livekit.rtc.AudioFrame` requires int16 data (`sizeof(int16)` hardcoded)
+- LiveKit server itself receives Opus-encoded WebRTC audio and doesn't care about WAV format
 
 ---
 

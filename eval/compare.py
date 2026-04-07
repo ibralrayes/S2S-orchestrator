@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+import numpy as np
 import aiohttp
 from livekit import rtc
 from livekit.api import AccessToken, VideoGrants
@@ -66,11 +67,75 @@ def host_accessible_url(url: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
+def normalize_wav(path: Path) -> tuple[bytes, int, int]:
+    """Return (int16_pcm_bytes, sample_rate, channels) for any WAV format.
+
+    Python's wave module and livekit.rtc.AudioFrame both require int16 PCM.
+    This handles float32 (format 3), float64, int32, int24, and uint8 inputs
+    by converting them to int16 in-memory via numpy — no disk write needed.
+    """
+    import struct
+
+    with open(path, "rb") as f:
+        # Parse RIFF header to detect format code without wave.open()
+        f.seek(20)
+        fmt_code = struct.unpack_from("<H", f.read(2))[0]
+        channels = struct.unpack_from("<H", f.read(2))[0]
+        sample_rate = struct.unpack_from("<I", f.read(4))[0]
+        f.seek(34)
+        bits_per_sample = struct.unpack_from("<H", f.read(2))[0]
+
+    if fmt_code == 1 and bits_per_sample == 16:
+        # Already int16 PCM — read normally
+        with wave.open(str(path), "rb") as wf:
+            raw = wf.readframes(wf.getnframes())
+        return raw, sample_rate, channels
+
+    # Need conversion — read data chunk directly
+    raw_bytes = path.read_bytes()
+    # Find 'data' chunk
+    offset = 12
+    while offset < len(raw_bytes) - 8:
+        chunk_id = raw_bytes[offset:offset + 4]
+        chunk_size = struct.unpack_from("<I", raw_bytes, offset + 4)[0]
+        if chunk_id == b"data":
+            audio_bytes = raw_bytes[offset + 8: offset + 8 + chunk_size]
+            break
+        offset += 8 + chunk_size
+    else:
+        raise ValueError(f"No data chunk found in {path.name}")
+
+    if fmt_code == 3:  # IEEE float
+        dtype = np.float32 if bits_per_sample == 32 else np.float64
+        samples = np.frombuffer(audio_bytes, dtype=dtype)
+        int16 = (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
+    elif fmt_code == 1 and bits_per_sample == 32:
+        samples = np.frombuffer(audio_bytes, dtype=np.int32)
+        int16 = (samples >> 16).astype(np.int16)
+    elif fmt_code == 1 and bits_per_sample == 8:
+        samples = np.frombuffer(audio_bytes, dtype=np.uint8).astype(np.int16)
+        int16 = ((samples - 128) * 256).astype(np.int16)
+    else:
+        raise ValueError(f"Unsupported WAV format: code={fmt_code}, bits={bits_per_sample}")
+
+    return int16.tobytes(), sample_rate, channels
+
+
+def pcm_to_wav_bytes(pcm: bytes, sample_rate: int, channels: int) -> bytes:
+    """Wrap raw int16 PCM bytes in a WAV container (in-memory)."""
+    import io
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(2)  # int16 = 2 bytes
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm)
+    return buf.getvalue()
+
+
 def audio_meta(path: Path) -> dict:
-    with wave.open(str(path), "rb") as f:
-        sr = f.getframerate()
-        ch = f.getnchannels()
-        fr = f.getnframes()
+    raw, sr, ch = normalize_wav(path)
+    fr = len(raw) // (ch * 2)  # int16 = 2 bytes per sample
     return {
         "filename": path.name,
         "sample_rate": sr,
@@ -147,12 +212,14 @@ async def direct_stt(
     audio_path: Path,
     duration_s: float,
 ) -> dict:
+    pcm, sr, ch = normalize_wav(audio_path)
+    wav_bytes = pcm_to_wav_bytes(pcm, sr, ch)
     start = time.perf_counter()
     form = aiohttp.FormData()
     form.add_field(
         "file",
-        audio_path.read_bytes(),
-        filename=audio_path.name,
+        wav_bytes,
+        filename=audio_path.stem + ".wav",
         content_type="audio/wav",
     )
     async with session.post(
@@ -310,7 +377,6 @@ async def run_direct(
 # ---------------------------------------------------------------------------
 
 def _make_token(env: dict[str, str], room: str, identity: str) -> str:
-    from livekit.protocol.agent_dispatch import RoomAgentDispatch
     from livekit.protocol.room import RoomConfiguration
 
     cfg = RoomConfiguration()
@@ -330,11 +396,9 @@ def _make_token(env: dict[str, str], room: str, identity: str) -> str:
 async def _stream_wav(source: rtc.AudioSource, wav_path: Path) -> tuple[float, float]:
     """Publish WAV audio into source at real-time rate.
     Returns (t_start, t_end) perf_counter timestamps.
+    Accepts any WAV format — normalizes to int16 PCM automatically.
     """
-    with wave.open(str(wav_path), "rb") as f:
-        sr = f.getframerate()
-        ch = f.getnchannels()
-        raw = f.readframes(f.getnframes())
+    raw, sr, ch = normalize_wav(wav_path)
 
     samples_per_frame = sr * PUBLISH_FRAME_MS // 1000
     frame_bytes = samples_per_frame * ch * 2  # int16
@@ -414,7 +478,7 @@ async def run_livekit(
             t_agent_joined.append(time.perf_counter())
 
     @room.on("track_subscribed")
-    def _on_track(track, publication, participant: rtc.RemoteParticipant) -> None:
+    def _on_track(track, _publication, participant: rtc.RemoteParticipant) -> None:
         if participant.kind == 4 and track.kind == rtc.TrackKind.KIND_AUDIO:
             asyncio.ensure_future(_drain_audio(track))
 
@@ -563,12 +627,8 @@ def print_summary(summary: list[dict], mode: str) -> None:
         return
 
     if mode in ("direct", "both"):
-        stt_vals  = [e["direct"]["e2e_approx_s"] for e in ok if "direct" in e]  # reuse below
-        stt_raw   = [e["direct"].get("stt_wall_s")  for e in ok if "direct" in e]
-        llm_raw   = [e["direct"].get("llm_ttft_s")  for e in ok if "direct" in e]
-        tts_raw   = [e["direct"].get("tts_wall_s")  for e in ok if "direct" in e]
-        e2e_vals  = [e["direct"]["e2e_approx_s"]    for e in ok if "direct" in e]
-        total_vals= [e["direct"]["total_s"]          for e in ok if "direct" in e]
+        e2e_vals   = [e["direct"]["e2e_approx_s"] for e in ok if "direct" in e]
+        total_vals = [e["direct"]["total_s"]       for e in ok if "direct" in e]
 
         print("  DIRECT pipeline")
         col = f"{'File':<28}  {'E2E':>7}  {'Total':>7}"
