@@ -173,16 +173,22 @@ The frontend should:
 A pre-configured voice agent demo UI is included in `demo/`. Start it alongside the stack:
 
 ```bash
-make demo
-```
-
-Or directly:
-
-```bash
 docker compose --profile demo up --build
 ```
 
-Open `http://localhost:3000`, click "Start conversation", and speak. The agent will respond in Arabic.
+Two demos share the same frontend:
+
+#### Realtime LiveKit demo (`http://localhost:3000`)
+
+- Full realtime pipeline through LiveKit: STT -> Nusuk chat -> TTS.
+- Uses the agent's current default turn handling: Silero VAD plus the optional LiveKit `MultilingualModel` turn detector when that dependency is installed in the worker image.
+
+#### Push-to-talk demo (`http://localhost:3000/ptt`)
+
+- Modular ASR -> Nusuk chat -> TTS. The browser records with `MediaRecorder`, the Next.js API routes under `/api/ptt/*` proxy to the services, and Nusuk auth is handled server-side with an auto-refreshing JWT (see `demo/lib/nusukAuth.ts`).
+- Useful as a debugging fallback when LiveKit media is misbehaving: every stage (record / transcribe / think / speak) surfaces its own status chip.
+
+Required env vars for the frontend container (populated by `docker-compose.yml` from `.env`): `ASR_URL`, `ASR_TOKEN`, `TTS_URL`, `NUSUK_URL`, `NUSUK_CLIENT_ID`, `NUSUK_CLIENT_SECRET`.
 
 The demo uses LiveKit's open-source [Agent Starter React](https://github.com/livekit-examples/agent-starter-react) template with the Agents UI component library.
 
@@ -362,7 +368,6 @@ For local Docker development, the defaults are:
 - `AGENT_NAME`
 - `AGENT_SYSTEM_PROMPT`
 - `AGENT_GREETING`
-- `AGENT_USE_TURN_DETECTOR`
 - `AGENT_VAD_ACTIVATION_THRESHOLD`
 - `AGENT_ALLOW_INTERRUPTIONS`
 - `AGENT_DISCARD_AUDIO_IF_UNINTERRUPTIBLE`
@@ -430,6 +435,72 @@ TTS:
 - `CUSTOM_TTS_NUM_CHANNELS`
 - `CUSTOM_TTS_AUDIO_FORMAT`
 - `CUSTOM_TTS_TIMEOUT_SECONDS`
+
+## Production deployment
+
+### Recommended machine split
+
+Run the orchestration layer on a CPU machine and all inference on a separate GPU machine:
+
+```text
+CPU machine                     GPU machine
+───────────────────────         ──────────────────────
+LiveKit server                  ASR   (port 8102)
+Agent workers                   TTS   (port 8000)
+Token server                    LLM   (if self-hosted)
+```
+
+No code changes are needed — the agent already makes pure HTTP calls to those services. Update `.env` to point at the GPU machine:
+
+```env
+CUSTOM_STT_URL=http://<gpu-machine-ip>:8102
+CUSTOM_TTS_URL=http://<gpu-machine-ip>:8000
+```
+
+Remove the `host.docker.internal` values from `docker-compose.yml` and drop the `extra_hosts` entries from the agent and frontend services.
+
+Keep both machines in the **same VPC or datacenter**. The agent calls ASR and TTS once per utterance; cross-region latency adds 20–80 ms per hop, which compounds noticeably in a voice pipeline.
+
+### LiveKit public IP — required for WebRTC audio
+
+This is the most common production failure. Without it, the WebSocket signaling works (the client connects) but no audio ever flows.
+
+WebRTC requires LiveKit to advertise the public IP of the host to browsers so they can send UDP media packets. If the server is behind NAT (it usually is on any cloud provider), you must tell LiveKit its external address.
+
+In `livekit-server/livekit.yaml`:
+
+```yaml
+rtc:
+  use_external_ip: true   # auto-detect from cloud instance metadata (EC2, GCP, etc.)
+```
+
+Or hardcode it:
+
+```yaml
+rtc:
+  node_ip: <your-public-ip>
+```
+
+Also open inbound UDP `50000–50100` in your firewall or security group. These are the WebRTC media ports.
+
+### VAD: CPU only, no GPU needed
+
+Silero VAD (preloaded in the agent worker's `prewarm` step) is a small ~2 MB model designed for real-time CPU inference. It processes each 50 ms audio frame in roughly 1–2 ms on a modern CPU core. There is no benefit to running it on GPU, and doing so would add a network hop on every audio frame.
+
+Keep VAD and the agent workers on the CPU machine.
+
+### Scaling to many concurrent users
+
+Each LiveKit room dispatches one agent worker process. At 100 concurrent sessions:
+
+| Layer | Approach |
+|---|---|
+| More agent workers | Add `deploy: replicas: N` to the `agent` service in `docker-compose.yml`; workers self-register and jobs are distributed automatically |
+| ASR throughput | Add replicas of the ASR service on the GPU machine behind a load balancer |
+| TTS throughput | Same — TTS (especially F5-TTS) is the slowest piece in the pipeline and benefits most from horizontal scaling |
+| LiveKit server | A single instance handles hundreds of rooms comfortably; escalate to LiveKit Cloud or a distributed cluster only if you exceed that |
+
+The agent process itself is I/O-bound (HTTP calls to ASR/LLM/TTS), so it scales horizontally with low overhead per added replica.
 
 ## Development workflow
 

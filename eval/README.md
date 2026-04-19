@@ -121,34 +121,76 @@ This isolates the cost added by WebRTC transport, VAD endpointing, and agent coo
   Audio: chunk_0011.wav
 ────────────────────────────────────────────────────────────
   DIRECT (no LiveKit)
-    STT wall:         0.088s   (backend  0.050s)
-    LLM TTFT:         0.648s   (total  0.753s)
-    TTS wall:         0.350s   (output  7.509s)
+    STT wall:         0.095s   (backend  0.060s)
+    LLM TTFT:         0.507s   (total  0.621s)
+    TTS wall:         0.310s   (output  5.824s)
     ─────────────────────────────
-    E2E (approx):     1.069s   [STT + LLM_TTFT + TTS]
+    E2E (approx):     0.901s   [STT + LLM_TTFT + TTS]
 
   LIVEKIT (full stack)
-    Room connect:     0.478s
-    Agent join:       0.308s
-    TTFA (from end):  1.314s   [end-of-speech → first agent audio]
-    TTFA (from start): 2.664s  [includes 1.23s audio duration]
-    Agent audio:      4.240s
-    Total wall:       9.278s
+    Room connect:     0.621s
+    Agent join:       1.312s
+    TTFA (from end):  1.265s   [end-of-speech → first agent audio]
+    TTFA (from start): 2.618s  [includes 1.23s audio duration]
+    Agent audio:      6.350s
+    Total wall:      12.981s
 
-  OVERHEAD (TTFA_start − audio_dur − Direct E2E):   0.367s
+  OVERHEAD (TTFA_start − audio_dur − Direct E2E):   0.489s
 ```
 
 ---
 
 ## Latency analysis
 
-### Observed baseline (local stack, Arabic audio)
+### Full benchmark (20 Arabic audio files, local stack)
 
-| | Min | Avg | Notes |
-|--|-----|-----|-------|
-| Direct E2E | 0.55s | 0.70s | STT + LLM TTFT + TTS, no WebRTC |
-| TTFA (from end) | 1.30s | 1.80s | Varies with VAD delay |
-| LiveKit overhead | 0.20s | 0.80s | Spikes to 3s+ on ambiguous audio endings |
+#### Direct pipeline breakdown
+
+| Stage | Avg | Min | Max | Stdev | Share of E2E |
+|-------|-----|-----|-----|-------|--------------|
+| STT | 0.117s | 0.066s | 0.158s | 0.024s | 14% |
+| **LLM TTFT** | **0.518s** | **0.209s** | **1.436s** | **0.314s** | **51%** |
+| TTS | 0.319s | 0.237s | 0.426s | 0.044s | 37% |
+| **E2E total** | **0.944s** | **0.556s** | **1.884s** | **0.321s** | — |
+
+STT and TTS are consistent (low stdev). **LLM TTFT is the dominant bottleneck in direct mode** — it varies 7× between best and worst case and accounts for 51% of end-to-end latency on average.
+
+#### LiveKit overhead breakdown (15 files where VAD triggered after speech ended)
+
+| Metric | Avg | Min | Max | Stdev |
+|--------|-----|-----|-----|-------|
+| TTFA (from end) | 2.116s | 0.526s | 3.455s | 1.062s |
+| VAD delay (TTFA_end − Direct E2E) | 1.195s | −0.57s | 2.808s | 1.198s |
+| Total overhead (TTFA_start − dur − Direct E2E) | 1.868s | −0.19s | 3.531s | 1.227s |
+
+**VAD endpointing delay is the dominant LiveKit overhead** — it adds 0.5–2.8s beyond the raw pipeline latency. WebRTC transport and agent join cost are negligible by comparison.
+
+5 of 20 files had `TTFA_end < 0` (agent responded before we finished publishing the audio). These are all long clips (>8s) where the audio contained a natural internal silence — VAD correctly triggered mid-utterance. This is expected behavior, not an error.
+
+#### Per-file results
+
+| File | Dur | Direct E2E | TTFA(end) | TTFA(start) | Overhead |
+|------|-----|-----------|-----------|-------------|---------|
+| chunk_0000 | 11.4s | 0.687s | +3.063s | 15.255s | +3.205s |
+| chunk_0001 | 11.4s | 0.782s | +2.451s | 14.664s | +2.519s |
+| chunk_0002 | 3.3s | 0.836s | +3.311s | 6.851s | +2.739s |
+| chunk_0003 | 16.5s | 0.834s | +0.526s | 18.279s | +0.991s |
+| chunk_0004 | 16.5s | 0.720s | +2.977s | 20.705s | +3.531s |
+| chunk_0005 | 4.1s | 0.584s | +1.417s | 5.796s | +1.104s |
+| chunk_0006 | 6.3s | 0.647s | +3.455s | 10.246s | +3.315s |
+| chunk_0007 | 5.2s | 0.556s | +1.288s | 6.853s | +1.101s |
+| chunk_0008 | 8.5s | 0.739s | **−4.466s** | 4.537s | — (mid-file VAD) |
+| chunk_0009 | 4.4s | 0.982s | +3.438s | 8.174s | +2.828s |
+| chunk_0010 | 2.9s | 1.884s | +1.447s | 4.618s | −0.190s |
+| chunk_0011 | 1.2s | 0.901s | +1.265s | 2.618s | +0.489s |
+| chunk_0012 | 10.9s | 0.686s | **−1.084s** | 10.544s | — (mid-file VAD) |
+| chunk_0013 | 10.9s | 1.183s | **−3.885s** | 7.766s | — (mid-file VAD) |
+| chunk_0014 | 13.4s | 0.711s | +2.484s | 16.775s | +2.676s |
+| chunk_0015 | 19.4s | 1.153s | +0.641s | 21.164s | +0.629s |
+| chunk_0016 | 19.4s | 1.206s | **−1.142s** | 19.544s | — (mid-file VAD) |
+| chunk_0017 | 16.0s | 1.245s | **−3.632s** | 13.430s | — (mid-file VAD) |
+| chunk_0018 | 12.5s | 1.331s | +0.765s | 14.035s | +0.252s |
+| chunk_0019 | 12.5s | 1.210s | +3.210s | 16.499s | +2.837s |
 
 ### Agent-side timeline (from `docker compose logs agent`)
 
