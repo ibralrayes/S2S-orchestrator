@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from collections.abc import AsyncGenerator
 
 import httpx
 from livekit.agents import DEFAULT_API_CONNECT_OPTIONS, APIConnectOptions, NOT_GIVEN, llm
 
 from config import AgentSettings, LLMSettings
+from plugins.nusuk_auth import NusukAuthError, NusukTokenManager
 
 logger = logging.getLogger("nusuk-agent.llm")
 
@@ -28,7 +30,17 @@ class CustomLLM(llm.LLM):
         self.agent_settings = agent_settings
         self.session_id = session_id
         self.user_id = user_id
+        self._provider_key = settings.provider.strip().lower()
         self._client = httpx.AsyncClient(timeout=settings.timeout_seconds)
+
+        self.token_manager: NusukTokenManager | None = None
+        if self._provider_key == "nusuk" and settings.client_id and settings.client_secret:
+            self.token_manager = NusukTokenManager(
+                base_url=settings.url,
+                client_id=settings.client_id,
+                client_secret=settings.client_secret,
+                client=self._client,
+            )
 
     @property
     def model(self) -> str:
@@ -78,11 +90,9 @@ class CustomLLMStream(llm.LLMStream):
         self._provider = llm_provider
 
     async def _run(self) -> None:
-        provider = self._provider.settings.provider.strip().lower()
-        if provider == "nusuk":
+        if self._provider._provider_key == "nusuk":
             await self._run_nusuk()
             return
-
         await self._run_openai()
 
     async def _run_openai(self) -> None:
@@ -116,39 +126,18 @@ class CustomLLMStream(llm.LLMStream):
             headers=_bearer_headers(self._provider.settings),
         ) as response:
             response.raise_for_status()
-            async for line in response.aiter_lines():
-                if not line or not line.startswith("data:"):
-                    continue
-
-                data = line.removeprefix("data:").strip()
-                if data == "[DONE]":
-                    break
-
-                try:
-                    event = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-
+            async for event in _iter_sse(response):
                 request_id = event.get("id") or request_id
-                delta = (
-                    event.get("choices", [{}])[0]
-                    .get("delta", {})
-                    .get("content")
-                )
+                delta = _extract_openai_delta(event)
                 if not delta:
                     continue
-
                 filtered = reasoning_filter.push(delta)
                 if not filtered:
                     continue
-
                 self._event_ch.send_nowait(
                     llm.ChatChunk(
                         id=request_id,
-                        delta=llm.ChoiceDelta(
-                            role="assistant",
-                            content=filtered,
-                        ),
+                        delta=llm.ChoiceDelta(role="assistant", content=filtered),
                     )
                 )
         logger.info("llm_done provider=%s", self._provider.settings.provider)
@@ -157,6 +146,10 @@ class CustomLLMStream(llm.LLMStream):
         query = _latest_user_message(self.chat_ctx)
         if not query:
             return
+
+        prefix = self._provider.settings.query_prefix
+        if prefix:
+            query = f"{prefix.strip()} {query}"
 
         payload = {
             "query": query,
@@ -169,41 +162,68 @@ class CustomLLMStream(llm.LLMStream):
             payload["user_id"] = self._provider.user_id
 
         request_id = str(uuid.uuid4())
-        logger.info("llm_start provider=%s", self._provider.settings.provider)
-        async with self._provider._client.stream(
-            "POST",
-            _nusuk_stream_url(self._provider.settings.url),
-            json=payload,
-            headers=_bearer_headers(self._provider.settings),
-        ) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if not line or not line.startswith("data:"):
-                    continue
+        logger.info(
+            "llm_start provider=%s session_id=%s query_len=%d",
+            self._provider.settings.provider,
+            self._provider.session_id,
+            len(query),
+        )
 
-                data = line.removeprefix("data:").strip()
-                if data == "[DONE]":
-                    break
-
-                try:
-                    event = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-
-                delta = event.get("delta")
-                if not isinstance(delta, str) or not delta:
-                    continue
-
-                self._event_ch.send_nowait(
-                    llm.ChatChunk(
-                        id=request_id,
-                        delta=llm.ChoiceDelta(
-                            role="assistant",
-                            content=delta,
-                        ),
-                    )
-                )
+        for attempt in range(2):
+            headers = await self._nusuk_headers()
+            try:
+                async with self._provider._client.stream(
+                    "POST",
+                    _nusuk_stream_url(self._provider.settings.url),
+                    json=payload,
+                    headers=headers,
+                ) as response:
+                    if response.status_code == 401 and attempt == 0 and self._provider.token_manager:
+                        await response.aread()
+                        logger.warning("llm_nusuk_401_invalidating_token")
+                        await self._provider.token_manager.invalidate()
+                        continue
+                    response.raise_for_status()
+                    async for event in _iter_sse(response):
+                        delta = event.get("delta")
+                        if not isinstance(delta, str) or not delta:
+                            continue
+                        self._event_ch.send_nowait(
+                            llm.ChatChunk(
+                                id=request_id,
+                                delta=llm.ChoiceDelta(role="assistant", content=delta),
+                            )
+                        )
+                break
+            except NusukAuthError:
+                logger.exception("llm_nusuk_auth_failed")
+                raise
         logger.info("llm_done provider=%s", self._provider.settings.provider)
+
+    async def _nusuk_headers(self) -> dict[str, str]:
+        if self._provider.token_manager is not None:
+            token = await self._provider.token_manager.get_token()
+            return {"Authorization": f"Bearer {token}"}
+        return _bearer_headers(self._provider.settings)
+
+
+async def _iter_sse(response: httpx.Response) -> AsyncGenerator[dict, None]:
+    """Yield parsed JSON events from an SSE response, skipping non-data lines and [DONE]."""
+    async for line in response.aiter_lines():
+        if not line or not line.startswith("data:"):
+            continue
+        data = line.removeprefix("data:").strip()
+        if data == "[DONE]":
+            return
+        try:
+            yield json.loads(data)
+        except json.JSONDecodeError:
+            logger.warning("sse_bad_chunk data=%s", data[:120])
+
+
+def _extract_openai_delta(event: dict) -> str | None:
+    """Extract the text delta from an OpenAI-style SSE chunk."""
+    return event.get("choices", [{}])[0].get("delta", {}).get("content")
 
 
 def _openai_chat_url(url: str) -> str:

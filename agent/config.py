@@ -27,7 +27,19 @@ class LLMSettings(BaseSettings):
         description="Bearer token for the LLM API",
         validation_alias=AliasChoices("CUSTOM_LLM_ACCESS_TOKEN", "GROQ"),
     )
+    client_id: str | None = Field(
+        default=None,
+        description="OAuth-style client_id for providers that mint tokens on demand (e.g. Nusuk)",
+    )
+    client_secret: str | None = Field(
+        default=None,
+        description="OAuth-style client_secret paired with client_id",
+    )
     language: str = Field(default="ar", description="Language hint for the LLM service")
+    query_prefix: str | None = Field(
+        default=None,
+        description="Text prepended to every user query (e.g. response-style instructions for providers that ignore system prompts)",
+    )
     include_metadata: bool = Field(default=True, description="Request metadata when the provider supports it")
     tool: str = Field(default="Knowledge", description="Nusuk tool name")
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
@@ -59,6 +71,8 @@ class AgentSettings(BaseSettings):
     greeting: str = Field(
         default="مرحبا، أنا مساعدك الصوتي. كيف أقدر أساعدك؟"
     )
+    explicit_eos_mode: bool = Field(default=False)
+    explicit_eos_topic: str = Field(default="eval.eos")
     use_turn_detector: bool = Field(default=False)
     vad_activation_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     allow_interruptions: bool = Field(default=True)

@@ -35,6 +35,7 @@ class CustomSTTAdapter(stt.STT):
             )
         )
         self.settings = settings
+        self._provider_key = settings.provider.strip().lower()
         self._client = httpx.AsyncClient(timeout=settings.timeout_seconds)
 
     @property
@@ -53,9 +54,8 @@ class CustomSTTAdapter(stt.STT):
         buffer: utils.AudioBuffer,
         *,
         language: Any = None,
-        conn_options: Any = None,
+        conn_options: Any = None,  # noqa: ARG002 — required by base class signature
     ) -> stt.SpeechEvent:
-        del conn_options
         frames = buffer if isinstance(buffer, list) else [buffer]
         result = await self.transcribe_frames(frames)
         transcript_language = language if isinstance(language, str) and language else result.language
@@ -69,28 +69,45 @@ class CustomSTTAdapter(stt.STT):
     async def transcribe_frames(self, frames: list[rtc.AudioFrame]) -> STTResult:
         request_id = str(uuid.uuid4())
         logger.info("request_id=%s stt_start frames=%s", request_id, len(frames))
-        wav_bytes = frames_to_wav_bytes(
-            frames, target_sample_rate=self.settings.target_sample_rate
-        )
-        files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
-        provider = self.settings.provider.strip().lower()
-        data = _request_form_data(self.settings, provider)
-        response = await self._client.post(
-            _transcribe_url(self.settings.url, provider),
-            data=data,
-            files=files,
-            headers=_bearer_headers(self.settings),
-        )
-        response.raise_for_status()
+        try:
+            wav_bytes = frames_to_wav_bytes(
+                frames, target_sample_rate=self.settings.target_sample_rate
+            )
+        except ValueError as exc:
+            logger.warning("request_id=%s stt_no_audio error=%s", request_id, exc)
+            return STTResult(text="", request_id=request_id, language=self.settings.language)
 
-        payload = response.json()
-        text = (
-            payload.get("transcription_text")
-            or payload.get("text")
-            or payload.get("transcript")
-            or payload.get("transcription")
-            or ""
-        )
+        files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
+        data = _request_form_data(self.settings, self._provider_key)
+        try:
+            response = await self._client.post(
+                _transcribe_url(self.settings.url, self._provider_key),
+                data=data,
+                files=files,
+                headers=_bearer_headers(self.settings),
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.error(
+                "request_id=%s stt_failed url=%s error=%s",
+                request_id,
+                _transcribe_url(self.settings.url, self._provider_key),
+                exc,
+            )
+            return STTResult(text="", request_id=request_id, language=self.settings.language)
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            logger.error("request_id=%s stt_bad_json error=%s", request_id, exc)
+            return STTResult(text="", request_id=request_id, language=self.settings.language)
+
+        text = ""
+        for key in ("transcription_text", "text", "transcript", "transcription"):
+            v = payload.get(key)
+            if isinstance(v, str) and v:
+                text = v
+                break
         logger.info(
             "request_id=%s stt_done provider=%s text=%s",
             request_id,
