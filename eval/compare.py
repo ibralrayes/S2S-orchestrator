@@ -9,6 +9,7 @@ Usage:
     python3 eval/compare.py --mode direct test.wav
     python3 eval/compare.py --mode livekit test.wav
     python3 eval/compare.py --mode both --runs 3 test.wav
+    python3 eval/compare.py --mode livekit --livekit-turn-mode explicit_eos test.wav
 
 Requirements:
     pip install livekit livekit-api aiohttp
@@ -42,6 +43,7 @@ PUBLISH_FRAME_MS = 20        # ms per published audio frame
 AGENT_JOIN_TIMEOUT_S = 15.0  # max wait for agent to join
 RESPONSE_TIMEOUT_S = 30.0    # max wait for agent first audio after speech ends
 AGENT_SILENCE_END_S = 1.5    # silence gap that marks end of agent response
+EXPLICIT_EOS_PAYLOAD = "__EOS__"
 
 
 # ---------------------------------------------------------------------------
@@ -239,54 +241,98 @@ async def direct_stt(
     }
 
 
+async def _nusuk_token(session: aiohttp.ClientSession, env: dict[str, str]) -> str:
+    """Fetch a one-shot Nusuk bearer token using client credentials."""
+    async with session.post(
+        env["CUSTOM_LLM_URL"].rstrip("/") + "/auth/token",
+        json={"client_id": env["CUSTOM_LLM_CLIENT_ID"], "client_secret": env["CUSTOM_LLM_CLIENT_SECRET"]},
+    ) as resp:
+        resp.raise_for_status()
+        return (await resp.json())["access_token"]
+
+
 async def direct_llm(
     session: aiohttp.ClientSession,
     env: dict[str, str],
     transcript: str,
+    *,
+    nusuk_token: str | None = None,
 ) -> dict:
-    system_prompt = env.get("AGENT_SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT)
-    payload = {
-        "model": env["CUSTOM_LLM_MODEL"],
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": transcript},
-        ],
-        "stream": True,
-        "reasoning_effort": "none",
-        "temperature": float(env.get("CUSTOM_LLM_TEMPERATURE", "0.2")),
-        "max_tokens": int(env.get("CUSTOM_LLM_MAX_TOKENS", "96")),
-    }
+    provider = env.get("CUSTOM_LLM_PROVIDER", "openai").strip().lower()
     start = time.perf_counter()
     first_chunk_at: float | None = None
     filt = VisibleTextFilter()
 
-    async with session.post(
-        env["CUSTOM_LLM_URL"].rstrip("/") + "/chat/completions",
-        json=payload,
-        headers={
-            "Authorization": f"Bearer {env['GROQ']}",
-            "Content-Type": "application/json",
-        },
-    ) as resp:
-        resp.raise_for_status()
-        async for raw in resp.content:
-            line = raw.decode("utf-8", errors="ignore").strip()
-            if not line.startswith("data: "):
-                continue
-            data = line[6:]
-            if data == "[DONE]":
-                break
-            try:
-                event = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-            delta = event.get("choices", [{}])[0].get("delta", {}).get("content")
-            if delta is None:
-                continue
-            now = time.perf_counter() - start
-            if first_chunk_at is None:
-                first_chunk_at = now
-            filt.push(delta, now)
+    if provider == "nusuk":
+        # Nusuk SSE: POST /chat/stream, lines are  data: {"delta": "..."}
+        payload = {
+            "query": transcript,
+            "session_id": "eval-direct",
+            "language": env.get("CUSTOM_LLM_LANGUAGE", "ar"),
+            "include_metadata": env.get("CUSTOM_LLM_INCLUDE_METADATA", "true").lower() == "true",
+            "tool": env.get("CUSTOM_LLM_TOOL", "Knowledge"),
+        }
+        url = env["CUSTOM_LLM_URL"].rstrip("/") + "/chat/stream"
+        headers = {"Authorization": f"Bearer {nusuk_token}"} if nusuk_token else {}
+        async with session.post(url, json=payload, headers=headers) as resp:
+            resp.raise_for_status()
+            async for raw in resp.content:
+                line = raw.decode("utf-8", errors="ignore").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line.removeprefix("data:").strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                delta = event.get("delta")
+                if not isinstance(delta, str) or not delta:
+                    continue
+                now = time.perf_counter() - start
+                if first_chunk_at is None:
+                    first_chunk_at = now
+                filt.push(delta, now)
+    else:
+        # OpenAI-compatible SSE: POST /chat/completions
+        system_prompt = env.get("AGENT_SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT)
+        payload = {
+            "model": env["CUSTOM_LLM_MODEL"],
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": transcript},
+            ],
+            "stream": True,
+            "reasoning_effort": "none",
+            "temperature": float(env.get("CUSTOM_LLM_TEMPERATURE", "0.2")),
+            "max_tokens": int(env.get("CUSTOM_LLM_MAX_TOKENS", "96")),
+        }
+        access_token = env.get("GROQ") or env.get("CUSTOM_LLM_ACCESS_TOKEN", "")
+        async with session.post(
+            env["CUSTOM_LLM_URL"].rstrip("/") + "/chat/completions",
+            json=payload,
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        ) as resp:
+            resp.raise_for_status()
+            async for raw in resp.content:
+                line = raw.decode("utf-8", errors="ignore").strip()
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                delta = event.get("choices", [{}])[0].get("delta", {}).get("content")
+                if delta is None:
+                    continue
+                now = time.perf_counter() - start
+                if first_chunk_at is None:
+                    first_chunk_at = now
+                filt.push(delta, now)
 
     total_s = time.perf_counter() - start
     text, first_visible_at = filt.finish(total_s)
@@ -299,22 +345,41 @@ async def direct_llm(
     }
 
 
+def _strip_markdown(text: str) -> str:
+    import re
+    text = re.sub(r'\*+([^*\n]+)\*+', r'\1', text)
+    text = re.sub(r'^\s*>+\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\[\d+\]', '', text)
+    text = re.sub(r'\n{2,}', ' ', text)
+    return text.strip()
+
+
 async def direct_tts(
     session: aiohttp.ClientSession,
     env: dict[str, str],
     text: str,
     output_path: Path,
 ) -> dict:
-    start = time.perf_counter()
-    async with session.post(
-        host_accessible_url(env["CUSTOM_TTS_URL"]).rstrip("/") + "/api/synthesize/",
-        json={
+    text = _strip_markdown(text)
+    provider = env.get("CUSTOM_TTS_PROVIDER", "local_api").strip().lower()
+    tts_base = host_accessible_url(env["CUSTOM_TTS_URL"]).rstrip("/")
+    access_token = env.get("CUSTOM_TTS_ACCESS_TOKEN", "")
+
+    if provider == "wrapper":
+        url = tts_base  # POST to root, no path suffix
+        body = {"text": text}
+        headers: dict[str, str] = {}
+    else:  # local_api or generic
+        url = tts_base + "/api/synthesize/"
+        body = {
             "text": text,
             "output_format": env.get("CUSTOM_TTS_AUDIO_FORMAT", "wav"),
             "sample_rate": int(env.get("CUSTOM_TTS_SAMPLE_RATE", "24000")),
-        },
-        headers={"Authorization": f"Bearer {env['CUSTOM_TTS_ACCESS_TOKEN']}"},
-    ) as resp:
+        }
+        headers = {"Authorization": f"Bearer {access_token}"} if access_token else {}
+
+    start = time.perf_counter()
+    async with session.post(url, json=body, headers=headers) as resp:
         hdr_processing = float(resp.headers.get("x-processing-time") or 0.0)
         audio_bytes = await resp.read()
         if resp.status >= 400:
@@ -342,12 +407,17 @@ async def run_direct(
     audio_path: Path,
     run_dir: Path,
 ) -> dict:
-    """STT → LLM → TTS via direct HTTP calls."""
+    """STT → LLM → TTS via direct HTTP calls (same services as the agent)."""
     meta = audio_meta(audio_path)
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=180)) as sess:
+        # Pre-fetch Nusuk token outside the timed window so auth overhead isn't counted.
+        nusuk_token: str | None = None
+        if env.get("CUSTOM_LLM_PROVIDER", "").strip().lower() == "nusuk":
+            nusuk_token = await _nusuk_token(sess, env)
+
         t0 = time.perf_counter()
         stt = await direct_stt(sess, env, audio_path, meta["duration_s"])
-        llm = await direct_llm(sess, env, stt["transcript"])
+        llm = await direct_llm(sess, env, stt["transcript"], nusuk_token=nusuk_token)
         if not llm["reply"]:
             raise RuntimeError("LLM returned empty reply")
         tts = await direct_tts(sess, env, llm["reply"], run_dir / "direct_output.wav")
@@ -427,6 +497,8 @@ async def run_livekit(
     env: dict[str, str],
     audio_path: Path,
     run_dir: Path,
+    *,
+    turn_mode: str,
 ) -> dict:
     """Publish audio into a LiveKit room and measure agent response timing."""
     lk_url = env.get("LIVEKIT_PUBLIC_URL", env.get("LIVEKIT_URL", "ws://localhost:7880"))
@@ -507,6 +579,11 @@ async def run_livekit(
     )
 
     t_speech_start, t_speech_end = await _stream_wav(source, audio_path)
+    if turn_mode == "explicit_eos":
+        await room.local_participant.publish_data(
+            EXPLICIT_EOS_PAYLOAD,
+            topic=env.get("AGENT_EXPLICIT_EOS_TOPIC", "eval.eos"),
+        )
 
     # Wait for agent audio response
     try:
@@ -530,6 +607,7 @@ async def run_livekit(
     result = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "mode": "livekit",
+        "turn_mode": turn_mode,
         "room": room_name,
         "livekit_url": lk_url,
         "input": meta,
@@ -540,6 +618,8 @@ async def run_livekit(
             "ttfa_from_start_s": round(ttfa_from_start_s, 3) if ttfa_from_start_s is not None else None,
             "agent_audio_duration_s": round(agent_duration_s, 3) if agent_duration_s is not None else None,
             "total_wall_s": round(total_wall_s, 3),
+            "speech_start_offset_s": round(t_speech_start - t_wall_start, 3),
+            "speech_end_offset_s": round(t_speech_end - t_wall_start, 3),
         },
         "speech_frames_received": speech_frames_rx[0],
     }
@@ -699,6 +779,12 @@ def parse_args() -> argparse.Namespace:
         metavar="N",
         help="Number of runs per audio file (default: 1)",
     )
+    p.add_argument(
+        "--livekit-turn-mode",
+        choices=["vad", "explicit_eos"],
+        default="vad",
+        help="Turn finalization mode for LiveKit benchmarks (default: vad)",
+    )
     return p.parse_args()
 
 
@@ -735,7 +821,12 @@ async def main() -> int:
 
             if args.mode in ("livekit", "both"):
                 try:
-                    livekit_result = await run_livekit(env, audio_path, run_dir)
+                    livekit_result = await run_livekit(
+                        env,
+                        audio_path,
+                        run_dir,
+                        turn_mode=args.livekit_turn_mode,
+                    )
                 except Exception as exc:
                     errors["livekit"] = str(exc)
                     print(f"[livekit] ERROR: {exc}")
@@ -757,6 +848,7 @@ async def main() -> int:
                 }
             if livekit_result:
                 entry["livekit"] = {
+                    "turn_mode": livekit_result.get("turn_mode", args.livekit_turn_mode),
                     "ttfa_from_end_s": livekit_result["timing"]["ttfa_from_end_s"],
                     "ttfa_from_start_s": livekit_result["timing"]["ttfa_from_start_s"],
                     "total_wall_s": livekit_result["timing"]["total_wall_s"],
