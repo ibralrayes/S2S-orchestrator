@@ -66,26 +66,43 @@ class CustomTTSChunkedStream(tts.ChunkedStream):
         )
 
     async def _run(self, output_emitter: AudioEmitter) -> None:
-        if not self.input_text.strip():
+        text = _strip_markdown(self.input_text).strip()
+        if not text:
             return
 
-        logger.info("tts_start text=%s", self.input_text)
-        response = await self._provider._client.post(
-            _tts_url(self._provider.settings.url, self._provider.settings.provider),
-            json=_request_payload(
-                self._provider.settings,
-                self.input_text,
-                self._provider.settings.provider,
-            ),
-            headers=_bearer_headers(self._provider.settings),
+        logger.info(
+            "tts_start provider=%s text_len=%d",
+            self._provider.settings.provider,
+            len(text),
         )
-        response.raise_for_status()
+        try:
+            response = await self._provider._client.post(
+                _tts_url(self._provider.settings.url, self._provider.settings.provider),
+                json=_request_payload(
+                    self._provider.settings,
+                    text,
+                    self._provider.settings.provider,
+                ),
+                headers=_bearer_headers(self._provider.settings),
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.error("tts_failed error=%s url=%s", exc, getattr(exc, "request", None))
+            request_id = str(uuid.uuid4())
+            output_emitter.initialize(
+                request_id=request_id,
+                sample_rate=self._provider.settings.sample_rate,
+                num_channels=self._provider.settings.num_channels,
+                mime_type="audio/pcm",
+                frame_size_ms=20,
+            )
+            return
 
         audio_bytes = response.content
         sample_rate = self._provider.settings.sample_rate
         num_channels = self._provider.settings.num_channels
 
-        if self._provider.settings.audio_format.lower() == "wav" or audio_bytes[:4] == b"RIFF":
+        if audio_bytes[:4] == b"RIFF":
             sample_rate, num_channels, audio_bytes = _decode_wav(audio_bytes)
 
         request_id = response.headers.get("x-synthesis-id") or str(uuid.uuid4())
@@ -97,10 +114,17 @@ class CustomTTSChunkedStream(tts.ChunkedStream):
             frame_size_ms=20,
         )
         output_emitter.push(audio_bytes)
-        logger.info("tts_done request_id=%s", request_id)
+        logger.info(
+            "tts_done request_id=%s audio_bytes=%d sample_rate=%d",
+            request_id,
+            len(audio_bytes),
+            sample_rate,
+        )
 
 
 def _request_payload(settings: TTSSettings, text: str, provider: str) -> dict[str, object]:
+    if provider == "wrapper":
+        return {"text": text}
     if provider == "local_api":
         return {
             "text": text,
@@ -117,12 +141,11 @@ def _request_payload(settings: TTSSettings, text: str, provider: str) -> dict[st
 
 def _tts_url(url: str, provider: str) -> str:
     normalized = url.rstrip("/")
+    if provider == "wrapper":
+        return normalized
     if provider == "local_api":
-        if normalized.endswith("/api/synthesize"):
-            return normalized + "/"
-        if normalized.endswith("/api/synthesize/"):
-            return normalized
-        return normalized + "/api/synthesize/"
+        base = normalized.removesuffix("/api/synthesize/").removesuffix("/api/synthesize")
+        return base + "/api/synthesize/"
     return normalized
 
 
@@ -130,6 +153,16 @@ def _bearer_headers(settings: TTSSettings) -> dict[str, str]:
     if not settings.access_token:
         return {}
     return {"Authorization": f"Bearer {settings.access_token}"}
+
+
+def _strip_markdown(text: str) -> str:
+    """Remove markdown formatting that TTS would speak literally."""
+    import re
+    text = re.sub(r'\*+([^*\n]+)\*+', r'\1', text)   # **bold** / *italic*
+    text = re.sub(r'^\s*>+\s*', '', text, flags=re.MULTILINE)  # > blockquotes
+    text = re.sub(r'\[\d+\]', '', text)               # [4] citation markers
+    text = re.sub(r'\n{2,}', ' ', text)               # collapse paragraph breaks
+    return text.strip()
 
 
 def _decode_wav(wav_bytes: bytes) -> tuple[int, int, bytes]:

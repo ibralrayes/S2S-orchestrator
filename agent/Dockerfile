@@ -13,4 +13,7 @@ COPY agent.py /app/
 COPY config.py /app/
 COPY plugins /app/plugins
 
+# Download turn detector model weights (cached in image layer)
+RUN python agent.py download-files
+
 CMD ["python", "agent.py", "start"]
