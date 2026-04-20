@@ -71,12 +71,14 @@ All session parameters come from `AgentSettings` (env prefix `AGENT_`):
 These values are intentionally fixed in `agent.py` and not env-configurable:
 
 ```python
-audio_input:  sample_rate=24000, num_channels=1, frame_size_ms=50
+audio_input:  sample_rate=16000, num_channels=1, frame_size_ms=50
               pre_connect_audio=True, pre_connect_audio_timeout=3.0s
 audio_output: sample_rate=tts_settings.sample_rate, num_channels=tts_settings.num_channels
 text_output:  sync_transcription=False, transcription_speed_factor=1.0
 text_input:   disabled (voice-only)
 ```
+
+Input is **16 kHz** — Silero VAD's native rate and the ASR target rate. LiveKit's server does the 48 → 16 kHz resample in Go before delivering to the agent, so `rtc.AudioResampler` in [custom_stt.py:168](../agent/plugins/custom_stt.py#L168) is a no-op on the hot path (the `if sample_rate != target_sample_rate` guard skips it). The resampler is kept as a safety net in case `CUSTOM_STT_TARGET_SAMPLE_RATE` is set to something different. Audio *output* stays at `tts_settings.sample_rate` (24 kHz with F5-TTS) — it's an independent stream.
 
 ## LLM Pipeline Detail
 
