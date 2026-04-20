@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import logging
+import time
 import uuid
 import wave
 
@@ -9,6 +10,7 @@ import httpx
 from livekit.agents import DEFAULT_API_CONNECT_OPTIONS, APIConnectOptions, tts
 from livekit.agents.tts.tts import AudioEmitter
 
+import metrics
 from config import TTSSettings
 
 logger = logging.getLogger("nusuk-agent.tts")
@@ -75,6 +77,7 @@ class CustomTTSChunkedStream(tts.ChunkedStream):
             self._provider.settings.provider,
             len(text),
         )
+        t0 = time.monotonic()
         try:
             response = await self._provider._client.post(
                 _tts_url(self._provider.settings.url, self._provider.settings.provider),
@@ -87,6 +90,7 @@ class CustomTTSChunkedStream(tts.ChunkedStream):
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
+            metrics.TTS_ERRORS.inc()
             logger.error("tts_failed error=%s url=%s", exc, getattr(exc, "request", None))
             request_id = str(uuid.uuid4())
             output_emitter.initialize(
@@ -114,11 +118,13 @@ class CustomTTSChunkedStream(tts.ChunkedStream):
             frame_size_ms=20,
         )
         output_emitter.push(audio_bytes)
+        metrics.TTS_DURATION.observe(time.monotonic() - t0)
         logger.info(
-            "tts_done request_id=%s audio_bytes=%d sample_rate=%d",
+            "tts_done request_id=%s audio_bytes=%d sample_rate=%d duration_s=%.3f",
             request_id,
             len(audio_bytes),
             sample_rate,
+            time.monotonic() - t0,
         )
 
 
