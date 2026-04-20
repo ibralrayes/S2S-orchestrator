@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncGenerator
 
 import httpx
 from livekit.agents import DEFAULT_API_CONNECT_OPTIONS, APIConnectOptions, NOT_GIVEN, llm
 
+import metrics
 from config import AgentSettings, LLMSettings
 from plugins.nusuk_auth import NusukAuthError, NusukTokenManager
 
@@ -24,6 +26,7 @@ class CustomLLM(llm.LLM):
         *,
         session_id: str,
         user_id: str | None = None,
+        token_manager: NusukTokenManager | None = None,
     ) -> None:
         super().__init__()
         self.settings = settings
@@ -33,14 +36,19 @@ class CustomLLM(llm.LLM):
         self._provider_key = settings.provider.strip().lower()
         self._client = httpx.AsyncClient(timeout=settings.timeout_seconds)
 
-        self.token_manager: NusukTokenManager | None = None
-        if self._provider_key == "nusuk" and settings.client_id and settings.client_secret:
+        # Prefer a pre-warmed token manager passed from prewarm() — avoids one
+        # extra auth RTT on the first turn of each room.
+        if token_manager is not None:
+            self.token_manager: NusukTokenManager | None = token_manager
+        elif self._provider_key == "nusuk" and settings.client_id and settings.client_secret:
             self.token_manager = NusukTokenManager(
                 base_url=settings.url,
                 client_id=settings.client_id,
                 client_secret=settings.client_secret,
                 client=self._client,
             )
+        else:
+            self.token_manager = None
 
     @property
     def model(self) -> str:
@@ -117,30 +125,41 @@ class CustomLLMStream(llm.LLMStream):
 
         request_id = str(uuid.uuid4())
         reasoning_filter = ReasoningStreamFilter()
+        provider_name = self._provider.settings.provider
 
-        logger.info("llm_start provider=%s", self._provider.settings.provider)
-        async with self._provider._client.stream(
-            "POST",
-            _openai_chat_url(self._provider.settings.url),
-            json=payload,
-            headers=_bearer_headers(self._provider.settings),
-        ) as response:
-            response.raise_for_status()
-            async for event in _iter_sse(response):
-                request_id = event.get("id") or request_id
-                delta = _extract_openai_delta(event)
-                if not delta:
-                    continue
-                filtered = reasoning_filter.push(delta)
-                if not filtered:
-                    continue
-                self._event_ch.send_nowait(
-                    llm.ChatChunk(
-                        id=request_id,
-                        delta=llm.ChoiceDelta(role="assistant", content=filtered),
+        logger.info("llm_start provider=%s", provider_name)
+        t0 = time.monotonic()
+        first_token = True
+        try:
+            async with self._provider._client.stream(
+                "POST",
+                _openai_chat_url(self._provider.settings.url),
+                json=payload,
+                headers=_bearer_headers(self._provider.settings),
+            ) as response:
+                response.raise_for_status()
+                async for event in _iter_sse(response):
+                    request_id = event.get("id") or request_id
+                    delta = _extract_openai_delta(event)
+                    if not delta:
+                        continue
+                    filtered = reasoning_filter.push(delta)
+                    if not filtered:
+                        continue
+                    if first_token:
+                        metrics.LLM_TTFT.observe(time.monotonic() - t0)
+                        first_token = False
+                    self._event_ch.send_nowait(
+                        llm.ChatChunk(
+                            id=request_id,
+                            delta=llm.ChoiceDelta(role="assistant", content=filtered),
+                        )
                     )
-                )
-        logger.info("llm_done provider=%s", self._provider.settings.provider)
+        except Exception:
+            metrics.LLM_ERRORS.labels(provider=provider_name).inc()
+            raise
+        metrics.LLM_DURATION.observe(time.monotonic() - t0)
+        logger.info("llm_done provider=%s duration_s=%.3f", provider_name, time.monotonic() - t0)
 
     async def _run_nusuk(self) -> None:
         query = _latest_user_message(self.chat_ctx)
@@ -162,13 +181,16 @@ class CustomLLMStream(llm.LLMStream):
             payload["user_id"] = self._provider.user_id
 
         request_id = str(uuid.uuid4())
+        provider_name = self._provider.settings.provider
         logger.info(
             "llm_start provider=%s session_id=%s query_len=%d",
-            self._provider.settings.provider,
+            provider_name,
             self._provider.session_id,
             len(query),
         )
 
+        t0 = time.monotonic()
+        first_token = True
         for attempt in range(2):
             headers = await self._nusuk_headers()
             try:
@@ -188,6 +210,9 @@ class CustomLLMStream(llm.LLMStream):
                         delta = event.get("delta")
                         if not isinstance(delta, str) or not delta:
                             continue
+                        if first_token:
+                            metrics.LLM_TTFT.observe(time.monotonic() - t0)
+                            first_token = False
                         self._event_ch.send_nowait(
                             llm.ChatChunk(
                                 id=request_id,
@@ -196,9 +221,14 @@ class CustomLLMStream(llm.LLMStream):
                         )
                 break
             except NusukAuthError:
+                metrics.LLM_ERRORS.labels(provider=provider_name).inc()
                 logger.exception("llm_nusuk_auth_failed")
                 raise
-        logger.info("llm_done provider=%s", self._provider.settings.provider)
+            except Exception:
+                metrics.LLM_ERRORS.labels(provider=provider_name).inc()
+                raise
+        metrics.LLM_DURATION.observe(time.monotonic() - t0)
+        logger.info("llm_done provider=%s duration_s=%.3f", provider_name, time.monotonic() - t0)
 
     async def _nusuk_headers(self) -> dict[str, str]:
         if self._provider.token_manager is not None:
