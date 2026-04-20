@@ -271,12 +271,15 @@ async def entrypoint(ctx: JobContext) -> None:
 
     await ctx.connect()
 
+    metrics.ACTIVE_SESSIONS.inc()
+
     stt_adapter = CustomSTTAdapter(stt_settings)
     llm_provider = CustomLLM(
         llm_settings,
         agent_settings,
         session_id=ctx.room.name,
         user_id=_resolve_user_identity(ctx, agent_settings),
+        token_manager=ctx.proc.userdata.get("nusuk_token_manager"),
     )
     tts_provider = CustomTTS(tts_settings)
 
@@ -364,6 +367,7 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.info("room=%s stage=session_ready", ctx.room.name)
         await disconnected.wait()
     finally:
+        metrics.ACTIVE_SESSIONS.dec()
         await streaming_stt.aclose()
         await _aclose_providers(stt_adapter, llm_provider, tts_provider)
 
