@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import logging
+import time
 import uuid
 import wave
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ import httpx
 from livekit import rtc
 from livekit.agents import stt, utils
 
+import metrics
 from config import STTSettings
 
 logger = logging.getLogger("nusuk-agent.stt")
@@ -79,6 +81,7 @@ class CustomSTTAdapter(stt.STT):
 
         files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
         data = _request_form_data(self.settings, self._provider_key)
+        t0 = time.monotonic()
         try:
             response = await self._client.post(
                 _transcribe_url(self.settings.url, self._provider_key),
@@ -87,7 +90,9 @@ class CustomSTTAdapter(stt.STT):
                 headers=_bearer_headers(self.settings),
             )
             response.raise_for_status()
+            metrics.STT_DURATION.observe(time.monotonic() - t0)
         except httpx.HTTPError as exc:
+            metrics.STT_ERRORS.inc()
             logger.error(
                 "request_id=%s stt_failed url=%s error=%s",
                 request_id,
