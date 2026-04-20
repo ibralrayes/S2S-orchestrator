@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
+import httpx
 from livekit import agents, rtc
 from livekit.agents import Agent, AgentServer, AgentSession, JobContext, cli, llm, stt
 from livekit.agents.voice import room_io
 from livekit.plugins import silero
 
+import metrics
 from config import AgentSettings, LLMSettings, STTSettings, TTSSettings
 from plugins.custom_llm import CustomLLM
 from plugins.custom_stt import CustomSTTAdapter
 from plugins.custom_tts import CustomTTS
+from plugins.nusuk_auth import NusukTokenManager
 
 try:
     from livekit.plugins.turn_detector.multilingual import MultilingualModel
@@ -23,17 +27,51 @@ logger = logging.getLogger("nusuk-agent")
 logging.basicConfig(level=logging.DEBUG)
 logging.getLogger("livekit.agents").setLevel(logging.DEBUG)
 
+# Maximum rooms per worker process. Above this fraction the worker stops accepting jobs.
+_MAX_JOBS_PER_WORKER = int(os.getenv("AGENT_MAX_JOBS_PER_WORKER", "10"))
+
 server = AgentServer()
+server.load_threshold = 0.8
+server.load_fnc = lambda s: min(len(s.active_jobs) / _MAX_JOBS_PER_WORKER, 1.0)
 
 # LiveKit participant kind value for agent processes (internal SDK constant).
 _AGENT_PARTICIPANT_KIND = 4
 
 
-def prewarm(proc: agents.JobProcess) -> None:
+async def prewarm(proc: agents.JobProcess) -> None:
     settings = AgentSettings()
+    llm_settings = LLMSettings()
+
+    # Start Prometheus metrics HTTP server — once per worker process.
+    metrics_port = int(os.getenv("AGENT_METRICS_PORT", "9090"))
+    metrics.start_server(metrics_port)
+
+    # Load Silero VAD model — shared across all sessions in this worker process.
     proc.userdata["vad"] = silero.VAD.load(
         activation_threshold=settings.vad_activation_threshold
     )
+
+    # Pre-fetch Nusuk JWT so the first room doesn't pay an auth RTT before
+    # its first LLM call. The token manager is shared across all sessions
+    # handled by this worker process.
+    if (
+        llm_settings.provider.strip().lower() == "nusuk"
+        and llm_settings.client_id
+        and llm_settings.client_secret
+    ):
+        shared_http_client = httpx.AsyncClient(timeout=llm_settings.timeout_seconds)
+        token_manager = NusukTokenManager(
+            base_url=llm_settings.url,
+            client_id=llm_settings.client_id,
+            client_secret=llm_settings.client_secret,
+            client=shared_http_client,
+        )
+        try:
+            await token_manager.get_token()
+            logger.info("prewarm nusuk_token_prefetched")
+        except Exception:
+            logger.warning("prewarm nusuk_token_prefetch_failed", exc_info=True)
+        proc.userdata["nusuk_token_manager"] = token_manager
 
 
 server.setup_fnc = prewarm
