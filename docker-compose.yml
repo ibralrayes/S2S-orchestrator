@@ -18,7 +18,9 @@ services:
     ports:
       - "7880:7880"
       - "7881:7881"
-      - "50000-50100:50000-50100/udp"
+      # 10k UDP ports → ~2500 concurrent participants (2 ports each).
+      # For production, prefer network_mode: host to avoid Docker port-map overhead.
+      - "50000-60000:50000-60000/udp"
     volumes:
       - ./livekit-server/livekit.yaml:/etc/livekit/livekit.yaml:ro
     healthcheck:
