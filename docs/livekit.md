@@ -73,7 +73,7 @@ Controls how the agent's I/O is wired to the room. Key options used here:
 room_io.RoomOptions(
     text_input=False,                        # voice-only, no text channel
     audio_input=room_io.AudioInputOptions(
-        sample_rate=24000,
+        sample_rate=16000,                   # native rate for Silero VAD + ASR; no agent-side resample
         num_channels=1,
         frame_size_ms=50,
         pre_connect_audio=True,              # buffer audio before session is fully ready

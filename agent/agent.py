@@ -90,7 +90,7 @@ def _build_room_options(
     return room_io.RoomOptions(
         text_input=False,  # disable text input channel (voice-only)
         audio_input=room_io.AudioInputOptions(
-            sample_rate=24000,        # Hz — must match VAD/STT expectations
+            sample_rate=16000,        # Hz — native rate for Silero VAD and ASR; avoids agent-side resample
             num_channels=1,           # mono
             frame_size_ms=50,         # audio capture granularity
             pre_connect_audio=True,   # buffer audio before session is fully ready

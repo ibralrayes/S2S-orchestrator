@@ -4,6 +4,13 @@ Ongoing record of significant changes, decisions, and findings. Most recent firs
 
 ---
 
+## 2026-04-20 (audio pipeline cleanup)
+
+### Agent input sample rate lowered from 24 kHz to 16 kHz
+`AudioInputOptions.sample_rate` in [agent.py:93](../agent/agent.py#L93) changed from 24000 → 16000. LiveKit's server now delivers 16 kHz audio directly — matching Silero VAD's native rate and the ASR target rate. The `rtc.AudioResampler` call in `custom_stt.py` becomes a no-op (guarded by `if sample_rate != target_sample_rate`) and is kept as a safety net. Saves one resample per turn and avoids mild filter ringing from the 48→24→16 chain. TTS output rate is unchanged (24 kHz, independent stream).
+
+---
+
 ## 2026-04-20 (concurrency + observability)
 
 ### Added load function to AgentServer
