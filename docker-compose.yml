@@ -49,6 +49,8 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./agent:/app
+    ports:
+      - "${AGENT_METRICS_PORT:-9090}:${AGENT_METRICS_PORT:-9090}"
     command: ["python", "agent.py", "start"]
 
   token-server:
