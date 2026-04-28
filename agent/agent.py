@@ -11,7 +11,8 @@ from livekit.agents.voice import room_io
 from livekit.plugins import silero
 
 import metrics
-from config import AgentSettings, LLMSettings, STTSettings, TTSSettings
+import observability
+from config import AgentSettings, LangfuseSettings, LLMSettings, STTSettings, TTSSettings
 from plugins.custom_llm import CustomLLM
 from plugins.custom_stt import CustomSTTAdapter
 from plugins.custom_tts import CustomTTS
@@ -38,13 +39,16 @@ server.load_fnc = lambda s: min(len(s.active_jobs) / _MAX_JOBS_PER_WORKER, 1.0)
 _AGENT_PARTICIPANT_KIND = 4
 
 
-async def prewarm(proc: agents.JobProcess) -> None:
+def prewarm(proc: agents.JobProcess) -> None:
     settings = AgentSettings()
     llm_settings = LLMSettings()
 
     # Start Prometheus metrics HTTP server — once per worker process.
     metrics_port = int(os.getenv("AGENT_METRICS_PORT", "9090"))
     metrics.start_server(metrics_port)
+
+    # Initialize Langfuse client — once per worker process, no-op when disabled.
+    observability.init(LangfuseSettings())
 
     # Load Silero VAD model — shared across all sessions in this worker process.
     proc.userdata["vad"] = silero.VAD.load(
@@ -64,10 +68,11 @@ async def prewarm(proc: agents.JobProcess) -> None:
             base_url=llm_settings.url,
             client_id=llm_settings.client_id,
             client_secret=llm_settings.client_secret,
+            user_id=llm_settings.auth_user_id,
             client=shared_http_client,
         )
         try:
-            await token_manager.get_token()
+            asyncio.run(token_manager.get_token())
             logger.info("prewarm nusuk_token_prefetched")
         except Exception:
             logger.warning("prewarm nusuk_token_prefetch_failed", exc_info=True)
@@ -273,12 +278,14 @@ async def entrypoint(ctx: JobContext) -> None:
 
     metrics.ACTIVE_SESSIONS.inc()
 
+    user_id = _resolve_user_identity(ctx, agent_settings)
+    observability.set_session(ctx.room.name, user_id)
     stt_adapter = CustomSTTAdapter(stt_settings)
     llm_provider = CustomLLM(
         llm_settings,
         agent_settings,
         session_id=ctx.room.name,
-        user_id=_resolve_user_identity(ctx, agent_settings),
+        user_id=user_id,
         token_manager=ctx.proc.userdata.get("nusuk_token_manager"),
     )
     tts_provider = CustomTTS(tts_settings)
