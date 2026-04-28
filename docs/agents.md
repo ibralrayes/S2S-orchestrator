@@ -9,7 +9,7 @@ Each incoming room job spawns a new Python worker process (forked from the pre-w
 ## Startup Sequence
 
 ```
-1. prewarm()     — async, called once per worker process at startup
+1. prewarm()     — sync, called once per worker process at startup
                    a. starts Prometheus metrics HTTP server (AGENT_METRICS_PORT, default 9090)
                    b. loads Silero VAD model into proc.userdata["vad"]
                    c. if provider=nusuk + client_id+secret set:
@@ -150,3 +150,5 @@ server.load_fnc = lambda s: min(len(s.active_jobs) / _MAX_JOBS_PER_WORKER, 1.0)
 | `agent_tts_errors_total` | Counter | TTS failures |
 
 The metrics server starts in `prewarm()` — one per worker process, with a silent fallback if the port is already bound by another worker in the same container. For multi-process accuracy in production, configure `PROMETHEUS_MULTIPROC_DIR` and use `MultiProcessCollector`.
+
+See [observability.md](observability.md) for the full Prometheus+Grafana and Langfuse setup (stacks under `observability/`).

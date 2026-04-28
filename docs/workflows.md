@@ -7,14 +7,14 @@ This is the main production path. One turn = one user utterance + one agent repl
 ```
 User speaks into microphone
     │
-    │  WebRTC audio frames (24 kHz mono, 50 ms)
+    │  WebRTC audio frames (16 kHz mono, 50 ms)
     ▼
 AgentSession (VAD listener)
     │  VAD (Silero) detects speech start, begins buffering frames
     │  VAD detects speech end → flushes frame buffer
     ▼
 stt.StreamAdapter._recognize_impl(buffer)
-    │  → frames_to_wav_bytes(): merge + resample to 16 kHz → WAV
+    │  → frames_to_wav_bytes(): merge frames → WAV (resample guard is no-op, input already 16 kHz)
     │  → POST /api/transcribe/ (multipart, Bearer auth)
     │  ← {transcription_text, language}
     ▼
@@ -201,9 +201,12 @@ Docker container starts (or replica launched)
 AgentServer registers worker with LiveKit server
     │  → WebSocket connection to LiveKit for job dispatch
     ▼
-prewarm() called once
-    │  → silero.VAD.load(activation_threshold=...)
-    │  → stored in proc.userdata["vad"]
+prewarm() called once (sync)
+    │  → metrics.start_server(AGENT_METRICS_PORT)
+    │  → observability.init(LangfuseSettings())       # no-op if disabled
+    │  → silero.VAD.load(activation_threshold=...) → proc.userdata["vad"]
+    │  → (if nusuk + client_id/secret) NusukTokenManager + asyncio.run(JWT prefetch)
+    │     → proc.userdata["nusuk_token_manager"]
     ▼
 Worker idle — waiting for job assignments
     │

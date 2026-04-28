@@ -1,5 +1,9 @@
 # Architecture
 
+![System diagram](diagrams/system.png)
+
+> Source: [diagrams/system.excalidraw](diagrams/system.excalidraw) — open in [excalidraw.com](https://excalidraw.com) or the VS Code Excalidraw extension. The PNG above is a pre-rendered snapshot; regenerate with `python3 scripts/render_excalidraw.py docs/diagrams/system.excalidraw docs/diagrams/system.png` after edits. The ASCII below is a quick reference.
+
 ## Component Diagram
 
 ```
