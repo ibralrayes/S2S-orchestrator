@@ -26,11 +26,15 @@ Modular pipeline driven by a hold-to-talk button. The browser records audio, the
 
 | Service | Role | Default Port |
 |---|---|---|
-| `livekit-server` | WebRTC media relay (SFU) | 7880 (WS), 7881 (TCP), 50000–50100 (UDP) |
-| `agent` | Python LiveKit agent worker pool | — (internal) |
+| `livekit-server` | WebRTC media relay (SFU) | 7880 (WS), 7881 (TCP), 50000–50100 (UDP), 6789 (Prometheus, internal) |
+| `agent` | Python LiveKit agent worker pool | 9090 (Prometheus), 8081 (internal) |
 | `token-server` | LiveKit JWT issuer | 8080 |
 | `redis` | LiveKit state store | 6379 (internal) |
-| `demo-frontend` | Optional Next.js demo UI | 3000 |
+| `demo-frontend` | Optional Next.js demo UI (`--profile demo`) | 3000 |
+| `prometheus` | Metrics scraper (`--profile observability`) | 9091 |
+| `grafana` | Dashboards (`--profile observability`) | 3001 |
+
+Langfuse runs as a separate compose project under `observability/langfuse/` — see [observability.md](observability.md).
 
 ## External Services (not in this repo)
 
@@ -45,11 +49,12 @@ Modular pipeline driven by a hold-to-talk button. The browser records audio, the
 - Turn detection is **always on** (`MultilingualModel` when installed, VAD-only fallback)
 - TTS input is stripped of markdown before synthesis (LLM responses contain `**bold**`, `[1]` citations)
 - Nusuk does not accept a system prompt; a `CUSTOM_LLM_QUERY_PREFIX` is prepended to every user query instead
-- Room I/O defaults (24 kHz mono, 50 ms frames, pre-connect audio) are **hard-coded** in `agent.py` — not env-configurable
+- Room I/O defaults (16 kHz mono, 50 ms frames, pre-connect audio) are **hard-coded** in `agent.py` — not env-configurable
 - All three HTTP clients (`STT`, `LLM`, `TTS`) are closed on session teardown regardless of error path
 
 ## Related Docs
 
+- [diagrams/](diagrams/) — Excalidraw system diagrams (canonical visual)
 - [architecture.md](architecture.md) — component diagram and data flow
 - [agents.md](agents.md) — agent session lifecycle and behavior
 - [livekit.md](livekit.md) — LiveKit SDK patterns used here

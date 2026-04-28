@@ -11,14 +11,18 @@ Calls `prometheus_client.start_http_server(port)`. Wraps the bind in `try/except
 
 ## `agent/agent.py`
 
-### `prewarm(proc)` (async)
-Called once per worker process before any jobs are dispatched. Steps in order:
+### `prewarm(proc)`
+Called once per worker process before any jobs are dispatched. Must be sync — the livekit-agents SDK invokes it from a sync context; an `async def` coroutine would be returned un-awaited and silently dropped. Steps in order:
 1. Starts the Prometheus HTTP server on `AGENT_METRICS_PORT` (default 9090) via `metrics.start_server()`.
-2. Loads Silero VAD into `proc.userdata["vad"]` — shared by all sessions in this worker.
-3. If `CUSTOM_LLM_PROVIDER=nusuk` and `client_id` + `client_secret` are set: creates a `NusukTokenManager`, pre-fetches the JWT, and stores it in `proc.userdata["nusuk_token_manager"]`. All sessions on this worker share the token manager, so the first turn of every room skips the auth roundtrip.
+2. Initializes Langfuse via `observability.init(LangfuseSettings())` — no-op when `LANGFUSE_ENABLED=false`.
+3. Loads Silero VAD into `proc.userdata["vad"]` — shared by all sessions in this worker.
+4. If `CUSTOM_LLM_PROVIDER=nusuk` and `client_id` + `client_secret` are set: creates a `NusukTokenManager`, pre-fetches the JWT via `asyncio.run(token_manager.get_token())`, and stores it in `proc.userdata["nusuk_token_manager"]`. All sessions on this worker share the token manager, so the first turn of every room skips the auth roundtrip.
+
+### `agent/observability.py`
+Langfuse client and per-session helpers. `init(settings)` creates the `Langfuse` client when `LANGFUSE_ENABLED=true` and both keys are set — otherwise leaves it `None`. `set_session(session_id, user_id)` stores a `SessionInfo` in a `ContextVar` read by the plugins. `start_span(name, input=...)` and `start_generation(name, model=..., input=...)` return a live Langfuse span/generation tagged with the current session, or a `_NoOpSpan` when Langfuse is disabled or no session is set. Callers always invoke `.update(...)` and `.end()`; both are no-ops on the no-op span.
 
 ### `_build_room_options(agent_settings, tts_settings) → room_io.RoomOptions`
-Constructs the `RoomOptions` passed to `session.start()`. Hard-codes audio input to 24 kHz mono 50 ms frames with pre-connect audio enabled (3 s timeout). Audio output sample rate and channels are taken from `tts_settings` so they match what the TTS adapter produces. Text input is disabled (voice-only).
+Constructs the `RoomOptions` passed to `session.start()`. Hard-codes audio input to 16 kHz mono 50 ms frames with pre-connect audio enabled (3 s timeout). 16 kHz matches Silero VAD's native rate and the ASR target rate — the `rtc.AudioResampler` in `custom_stt.py` becomes a no-op on the hot path. Audio output sample rate and channels are taken from `tts_settings` so they match what the TTS adapter produces. Text input is disabled (voice-only).
 
 ### `_extract_text(value) → str`
 Normalizes an LLM content value into a plain string. Handles three forms:
