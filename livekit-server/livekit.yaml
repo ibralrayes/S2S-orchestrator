@@ -3,7 +3,7 @@ port: 7880
 rtc:
   tcp_port: 7881
   port_range_start: 50000
-  port_range_end: 60000
+  port_range_end: 50100
   use_external_ip: false
 
 redis:
@@ -11,4 +11,6 @@ redis:
 
 keys:
   devkey: secret
+
+prometheus_port: 6789
 
