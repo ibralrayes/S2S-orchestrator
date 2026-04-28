@@ -4,6 +4,31 @@ Ongoing record of significant changes, decisions, and findings. Most recent firs
 
 ---
 
+## 2026-04-22 (observability stack)
+
+### Added Prometheus + Grafana compose services
+New `prometheus` and `grafana` services in [docker-compose.yml](../docker-compose.yml) under profile `observability` (`docker compose --profile observability up -d`). Prometheus scrape config at [observability/prometheus.yml](../observability/prometheus.yml) covers `agent:9090` (existing histograms) and `livekit-server:6789` (new — enabled via `prometheus_port: 6789` in [livekit-server/livekit.yaml](../livekit-server/livekit.yaml)). Grafana auto-provisions a Prometheus datasource and a starter dashboard **S2S / S2S Agent** from [observability/grafana/provisioning/](../observability/grafana/provisioning/) — panels: active sessions, STT/LLM/TTS p50/p95/p99 latency, error rates. Default host ports: Grafana 3001, Prometheus 9091 (both overridable).
+
+### Added Langfuse trace instrumentation to plugins
+New module [agent/observability.py](../agent/observability.py) — per-worker Langfuse client (`init`), per-session contextvar (`set_session`), and `start_span` / `start_generation` helpers returning live spans or `_NoOpSpan`s when disabled. [agent/plugins/custom_stt.py](../agent/plugins/custom_stt.py) wraps its HTTP call in an `stt` span, [agent/plugins/custom_llm.py](../agent/plugins/custom_llm.py) wraps both openai and nusuk stream paths in an `llm-chat` generation (with `ttft_s` / `duration_s` metadata), and [agent/plugins/custom_tts.py](../agent/plugins/custom_tts.py) wraps its HTTP call in a `tts` span. All three pass `session_id = LiveKit room name` and `user_id = participant identity` via `update_trace` so Langfuse's Sessions view groups a whole call into a waterfall. `LangfuseSettings` added to [agent/config.py](../agent/config.py); new env vars `LANGFUSE_ENABLED`, `LANGFUSE_HOST`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_FLUSH_AT`, `LANGFUSE_FLUSH_INTERVAL`.
+
+### Self-hosted Langfuse v3 stack
+New [observability/langfuse/docker-compose.yml](../observability/langfuse/docker-compose.yml) — separate compose project for isolation, services: `langfuse-web`, `langfuse-worker`, `postgres`, `clickhouse`, `redis`, `minio`. Port remaps from upstream defaults to avoid conflicts: web 3000 → 3100 (demo-frontend owns 3000), MinIO API 9000 → 9190, MinIO console 9001 → 9191 (Prometheus owns 9091), Postgres → 5532, Redis → 6389, ClickHouse native → 9500. Secrets and `LANGFUSE_INIT_*` bootstrap vars live in the project-local `.env` (gitignored). Agent reaches Langfuse via `host.docker.internal:3100` (same pattern as ASR/TTS).
+
+### Fixed `prewarm()` never running
+Reverted `prewarm()` from `async def` back to sync. The livekit-agents 1.5.x SDK invokes `setup_fnc` from a sync context — an `async def prewarm` produced a coroutine that was never awaited, so metrics.start_server, VAD load, and (previously) Nusuk token prefetch were silently dropped. Sync prewarm now actually runs. JWT prefetch wrapped in `asyncio.run(token_manager.get_token())` to preserve the prewarm-time fetch without needing an async function. This resolves a previously-silent bug introduced in the 2026-04-20 prewarm change.
+
+### Narrowed LiveKit UDP port range back to 50000–50100
+Reverted the 2026-04-20 widening to 60000. The 10k-port Docker bind races against ephemeral UDP sockets on busy hosts and fails with `address already in use`. The running container since 2026-04-15 had been on the narrow 50000–50100 range and worked fine, so the narrower range was restored to unblock restarts. For >50 concurrent participants in production, switch `livekit-server` to `network_mode: host` (no Docker port proxy) rather than widening the mapped range.
+
+### Added `COPY` for metrics.py and observability.py in agent Dockerfile
+[agent/Dockerfile](../agent/Dockerfile) was missing `COPY metrics.py` (since 2026-04-20) — the build-time `download-files` step failed with `ModuleNotFoundError: No module named 'metrics'`. Runtime worked only because `docker-compose.yml` volume-mounts `./agent:/app` at runtime, masking the incomplete image. Now both `metrics.py` and the new `observability.py` are explicitly copied.
+
+### New doc
+[docs/observability.md](observability.md) — full setup + ports reference for both the Prometheus/Grafana and Langfuse stacks.
+
+---
+
 ## 2026-04-20 (audio pipeline cleanup)
 
 ### Agent input sample rate lowered from 24 kHz to 16 kHz

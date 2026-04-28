@@ -1,0 +1,103 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Active sessions",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "id": 1,
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "agent_active_sessions_total", "refId": "A"}
+      ],
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 50}, {"color": "red", "value": 100}]}}, "overrides": []},
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"}
+    },
+    {
+      "type": "timeseries",
+      "title": "STT duration (seconds)",
+      "gridPos": {"h": 8, "w": 12, "x": 6, "y": 0},
+      "id": 2,
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(agent_stt_duration_seconds_bucket[5m])) by (le))", "refId": "p50", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(agent_stt_duration_seconds_bucket[5m])) by (le))", "refId": "p95", "legendFormat": "p95"},
+        {"expr": "histogram_quantile(0.99, sum(rate(agent_stt_duration_seconds_bucket[5m])) by (le))", "refId": "p99", "legendFormat": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM time-to-first-token (seconds)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "id": 3,
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(agent_llm_ttft_seconds_bucket[5m])) by (le))", "refId": "p50", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(agent_llm_ttft_seconds_bucket[5m])) by (le))", "refId": "p95", "legendFormat": "p95"},
+        {"expr": "histogram_quantile(0.99, sum(rate(agent_llm_ttft_seconds_bucket[5m])) by (le))", "refId": "p99", "legendFormat": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "TTS duration (seconds)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "id": 4,
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(agent_tts_duration_seconds_bucket[5m])) by (le))", "refId": "p50", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(agent_tts_duration_seconds_bucket[5m])) by (le))", "refId": "p95", "legendFormat": "p95"},
+        {"expr": "histogram_quantile(0.99, sum(rate(agent_tts_duration_seconds_bucket[5m])) by (le))", "refId": "p99", "legendFormat": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM total duration (seconds)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "id": 5,
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(agent_llm_duration_seconds_bucket[5m])) by (le))", "refId": "p50", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(agent_llm_duration_seconds_bucket[5m])) by (le))", "refId": "p95", "legendFormat": "p95"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 10}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Error rate (per 5m)",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20},
+      "id": 6,
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sum(rate(agent_stt_errors_total[5m]))", "refId": "stt", "legendFormat": "STT"},
+        {"expr": "sum(rate(agent_llm_errors_total[5m])) by (provider)", "refId": "llm", "legendFormat": "LLM ({{provider}})"},
+        {"expr": "sum(rate(agent_tts_errors_total[5m]))", "refId": "tts", "legendFormat": "TTS"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"drawStyle": "line", "lineWidth": 2, "fillOpacity": 20, "stacking": {"mode": "normal", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}}
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["s2s", "agent"],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "S2S Agent",
+  "uid": "s2s-agent",
+  "version": 1,
+  "weekStart": ""
+}
