@@ -11,6 +11,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY agent.py /app/
 COPY config.py /app/
+COPY metrics.py /app/
+COPY observability.py /app/
 COPY plugins /app/plugins
 
 # Download turn detector model weights (cached in image layer)
