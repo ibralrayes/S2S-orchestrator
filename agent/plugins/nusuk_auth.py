@@ -27,11 +27,13 @@ class NusukTokenManager:
         client_secret: str,
         client: httpx.AsyncClient,
         *,
+        user_id: str | None = None,
         refresh_margin_seconds: int = 60,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._client_id = client_id
         self._client_secret = client_secret
+        self._user_id = user_id or client_id
         self._client = client
         self._refresh_margin = refresh_margin_seconds
         self._token: str | None = None
@@ -66,6 +68,7 @@ class NusukTokenManager:
                 json={
                     "client_id": self._client_id,
                     "client_secret": self._client_secret,
+                    "user_id": self._user_id,
                 },
             )
         except httpx.HTTPError as exc:
