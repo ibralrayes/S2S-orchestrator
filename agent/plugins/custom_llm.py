@@ -10,7 +10,6 @@ import httpx
 from livekit.agents import DEFAULT_API_CONNECT_OPTIONS, APIConnectOptions, NOT_GIVEN, llm
 
 import metrics
-import observability
 from config import AgentSettings, LLMSettings
 from plugins.nusuk_auth import NusukAuthError, NusukTokenManager
 
@@ -131,12 +130,6 @@ class CustomLLMStream(llm.LLMStream):
         output_parts: list[str] = []
         ttft_s: float | None = None
 
-        generation = observability.start_generation(
-            name="llm-chat",
-            model=self._provider.settings.model,
-            input=messages,
-        )
-
         logger.info("llm_start provider=%s", provider_name)
         t0 = time.monotonic()
         first_token = True
@@ -169,16 +162,9 @@ class CustomLLMStream(llm.LLMStream):
                     )
         except Exception as exc:
             metrics.LLM_ERRORS.labels(provider=provider_name).inc()
-            generation.update(level="ERROR", status_message=str(exc))
-            generation.end()
             raise
         duration_s = time.monotonic() - t0
         metrics.LLM_DURATION.observe(duration_s)
-        generation.update(
-            output="".join(output_parts),
-            metadata={"ttft_s": ttft_s, "duration_s": duration_s, "provider": provider_name},
-        )
-        generation.end()
         logger.info("llm_done provider=%s duration_s=%.3f", provider_name, duration_s)
 
     async def _run_nusuk(self) -> None:
@@ -204,12 +190,6 @@ class CustomLLMStream(llm.LLMStream):
         provider_name = self._provider.settings.provider
         output_parts: list[str] = []
         ttft_s: float | None = None
-
-        generation = observability.start_generation(
-            name="llm-chat",
-            model=self._provider.settings.model,
-            input={"query": query, "tool": self._provider.settings.tool},
-        )
 
         logger.info(
             "llm_start provider=%s session_id=%s query_len=%d",
@@ -251,24 +231,15 @@ class CustomLLMStream(llm.LLMStream):
                             )
                         )
                 break
-            except NusukAuthError as exc:
+            except NusukAuthError:
                 metrics.LLM_ERRORS.labels(provider=provider_name).inc()
                 logger.exception("llm_nusuk_auth_failed")
-                generation.update(level="ERROR", status_message=f"nusuk_auth: {exc}")
-                generation.end()
                 raise
-            except Exception as exc:
+            except Exception:
                 metrics.LLM_ERRORS.labels(provider=provider_name).inc()
-                generation.update(level="ERROR", status_message=str(exc))
-                generation.end()
                 raise
         duration_s = time.monotonic() - t0
         metrics.LLM_DURATION.observe(duration_s)
-        generation.update(
-            output="".join(output_parts),
-            metadata={"ttft_s": ttft_s, "duration_s": duration_s, "provider": provider_name},
-        )
-        generation.end()
         logger.info("llm_done provider=%s duration_s=%.3f", provider_name, duration_s)
 
     async def _nusuk_headers(self) -> dict[str, str]:
