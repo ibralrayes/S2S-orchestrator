@@ -4,6 +4,13 @@ Ongoing record of significant changes, decisions, and findings. Most recent firs
 
 ---
 
+## 2026-05-03
+
+### Removed Langfuse — Prometheus + Grafana only
+Removed `langfuse>=2,<4` from `agent/requirements.txt`, deleted `agent/observability.py`, removed `LangfuseSettings` from `agent/config.py`, dropped all `import observability` / `start_span` / `start_generation` calls from `custom_stt.py`, `custom_llm.py`, `custom_tts.py`, and `agent.py`. Removed `LANGFUSE_*` vars from `.env.example` and `.env`. Removed `observability/langfuse/` stack. Prometheus + Grafana remain under `--profile observability`. Updated all docs.
+
+---
+
 ## 2026-04-22 (observability stack)
 
 ### Added Prometheus + Grafana compose services

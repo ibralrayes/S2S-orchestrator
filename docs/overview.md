@@ -34,8 +34,6 @@ Modular pipeline driven by a hold-to-talk button. The browser records audio, the
 | `prometheus` | Metrics scraper (`--profile observability`) | 9091 |
 | `grafana` | Dashboards (`--profile observability`) | 3001 |
 
-Langfuse runs as a separate compose project under `observability/langfuse/` — see [observability.md](observability.md).
-
 ## External Services (not in this repo)
 
 | Service | URL (default) | Protocol |

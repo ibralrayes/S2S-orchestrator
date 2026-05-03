@@ -20,7 +20,7 @@ server = AgentServer()
 server.setup_fnc = prewarm   # called once per worker process before any jobs
 ```
 
-`prewarm` is invoked synchronously by the SDK (not awaited), so it must be `def` not `async def`. It starts the Prometheus metrics server, initializes Langfuse (see [observability.md](observability.md)), loads Silero VAD into `proc.userdata["vad"]`, and (for the nusuk provider) pre-fetches a JWT via `asyncio.run(...)`. Everything in `proc.userdata` is shared across all sessions handled by that worker.
+`prewarm` is invoked synchronously by the SDK (not awaited), so it must be `def` not `async def`. It starts the Prometheus metrics server, loads Silero VAD into `proc.userdata["vad"]`, and (for the nusuk provider) pre-fetches a JWT via `asyncio.run(...)`. Everything in `proc.userdata` is shared across all sessions handled by that worker.
 
 ## `AgentSession`
 
