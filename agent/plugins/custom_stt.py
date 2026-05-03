@@ -13,7 +13,6 @@ from livekit import rtc
 from livekit.agents import stt, utils
 
 import metrics
-import observability
 from config import STTSettings
 
 logger = logging.getLogger("nusuk-agent.stt")
@@ -82,14 +81,6 @@ class CustomSTTAdapter(stt.STT):
 
         files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
         data = _request_form_data(self.settings, self._provider_key)
-        span = observability.start_span(
-            name="stt",
-            input={
-                "provider": self.settings.provider,
-                "frames": len(frames),
-                "audio_bytes": len(wav_bytes),
-            },
-        )
         t0 = time.monotonic()
         try:
             response = await self._client.post(
@@ -108,16 +99,12 @@ class CustomSTTAdapter(stt.STT):
                 _transcribe_url(self.settings.url, self._provider_key),
                 exc,
             )
-            span.update(level="ERROR", status_message=str(exc))
-            span.end()
             return STTResult(text="", request_id=request_id, language=self.settings.language)
 
         try:
             payload = response.json()
         except ValueError as exc:
             logger.error("request_id=%s stt_bad_json error=%s", request_id, exc)
-            span.update(level="ERROR", status_message=f"bad_json: {exc}")
-            span.end()
             return STTResult(text="", request_id=request_id, language=self.settings.language)
 
         text = ""
@@ -133,8 +120,6 @@ class CustomSTTAdapter(stt.STT):
             self.settings.provider,
             text.strip(),
         )
-        span.update(output={"text": text.strip(), "request_id": resolved_request_id})
-        span.end()
         return STTResult(
             text=text.strip(),
             request_id=resolved_request_id,

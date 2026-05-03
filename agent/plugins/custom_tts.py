@@ -11,7 +11,6 @@ from livekit.agents import DEFAULT_API_CONNECT_OPTIONS, APIConnectOptions, tts
 from livekit.agents.tts.tts import AudioEmitter
 
 import metrics
-import observability
 from config import TTSSettings
 
 logger = logging.getLogger("nusuk-agent.tts")
@@ -73,15 +72,6 @@ class CustomTTSChunkedStream(tts.ChunkedStream):
         if not text:
             return
 
-        span = observability.start_span(
-            name="tts",
-            input={
-                "provider": self._provider.settings.provider,
-                "text": text,
-                "text_len": len(text),
-            },
-        )
-
         logger.info(
             "tts_start provider=%s text_len=%d",
             self._provider.settings.provider,
@@ -102,8 +92,6 @@ class CustomTTSChunkedStream(tts.ChunkedStream):
         except httpx.HTTPError as exc:
             metrics.TTS_ERRORS.inc()
             logger.error("tts_failed error=%s url=%s", exc, getattr(exc, "request", None))
-            span.update(level="ERROR", status_message=str(exc))
-            span.end()
             request_id = str(uuid.uuid4())
             output_emitter.initialize(
                 request_id=request_id,
@@ -132,15 +120,6 @@ class CustomTTSChunkedStream(tts.ChunkedStream):
         output_emitter.push(audio_bytes)
         duration_s = time.monotonic() - t0
         metrics.TTS_DURATION.observe(duration_s)
-        span.update(
-            output={
-                "request_id": str(request_id),
-                "audio_bytes": len(audio_bytes),
-                "sample_rate": sample_rate,
-            },
-            metadata={"duration_s": duration_s},
-        )
-        span.end()
         logger.info(
             "tts_done request_id=%s audio_bytes=%d sample_rate=%d duration_s=%.3f",
             request_id,

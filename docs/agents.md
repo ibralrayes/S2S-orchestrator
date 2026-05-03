@@ -151,4 +151,4 @@ server.load_fnc = lambda s: min(len(s.active_jobs) / _MAX_JOBS_PER_WORKER, 1.0)
 
 The metrics server starts in `prewarm()` — one per worker process, with a silent fallback if the port is already bound by another worker in the same container. For multi-process accuracy in production, configure `PROMETHEUS_MULTIPROC_DIR` and use `MultiProcessCollector`.
 
-See [observability.md](observability.md) for the full Prometheus+Grafana and Langfuse setup (stacks under `observability/`).
+See [observability.md](observability.md) for the Prometheus+Grafana setup.

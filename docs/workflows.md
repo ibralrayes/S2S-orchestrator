@@ -203,7 +203,6 @@ AgentServer registers worker with LiveKit server
     ▼
 prewarm() called once (sync)
     │  → metrics.start_server(AGENT_METRICS_PORT)
-    │  → observability.init(LangfuseSettings())       # no-op if disabled
     │  → silero.VAD.load(activation_threshold=...) → proc.userdata["vad"]
     │  → (if nusuk + client_id/secret) NusukTokenManager + asyncio.run(JWT prefetch)
     │     → proc.userdata["nusuk_token_manager"]

@@ -65,17 +65,6 @@ class TTSSettings(BaseSettings):
     timeout_seconds: float = Field(default=60.0, ge=1)
 
 
-class LangfuseSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="LANGFUSE_", extra="ignore")
-
-    enabled: bool = Field(default=False)
-    host: str = Field(default="http://host.docker.internal:3100")
-    public_key: str | None = Field(default=None)
-    secret_key: str | None = Field(default=None)
-    flush_at: int = Field(default=15, ge=1)
-    flush_interval: float = Field(default=5.0, ge=0.1)
-
-
 class AgentSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="AGENT_", extra="ignore")
 

@@ -11,8 +11,7 @@ from livekit.agents.voice import room_io
 from livekit.plugins import silero
 
 import metrics
-import observability
-from config import AgentSettings, LangfuseSettings, LLMSettings, STTSettings, TTSSettings
+from config import AgentSettings, LLMSettings, STTSettings, TTSSettings
 from plugins.custom_llm import CustomLLM
 from plugins.custom_stt import CustomSTTAdapter
 from plugins.custom_tts import CustomTTS
@@ -46,9 +45,6 @@ def prewarm(proc: agents.JobProcess) -> None:
     # Start Prometheus metrics HTTP server — once per worker process.
     metrics_port = int(os.getenv("AGENT_METRICS_PORT", "9090"))
     metrics.start_server(metrics_port)
-
-    # Initialize Langfuse client — once per worker process, no-op when disabled.
-    observability.init(LangfuseSettings())
 
     # Load Silero VAD model — shared across all sessions in this worker process.
     proc.userdata["vad"] = silero.VAD.load(
@@ -279,7 +275,6 @@ async def entrypoint(ctx: JobContext) -> None:
     metrics.ACTIVE_SESSIONS.inc()
 
     user_id = _resolve_user_identity(ctx, agent_settings)
-    observability.set_session(ctx.room.name, user_id)
     stt_adapter = CustomSTTAdapter(stt_settings)
     llm_provider = CustomLLM(
         llm_settings,
