@@ -14,6 +14,7 @@ from livekit.agents import stt, utils
 
 import metrics
 from config import STTSettings
+from plugins.nusuk_auth import NusukTokenManager
 
 logger = logging.getLogger("nusuk-agent.stt")
 
@@ -28,7 +29,11 @@ class STTResult:
 class CustomSTTAdapter(stt.STT):
     """HTTP adapter for local ASR, OpenAI-style, and Nusuk transcription endpoints."""
 
-    def __init__(self, settings: STTSettings) -> None:
+    def __init__(
+        self,
+        settings: STTSettings,
+        token_manager: NusukTokenManager | None = None,
+    ) -> None:
         super().__init__(
             capabilities=stt.STTCapabilities(
                 streaming=False,
@@ -38,6 +43,7 @@ class CustomSTTAdapter(stt.STT):
         )
         self.settings = settings
         self._provider_key = settings.provider.strip().lower()
+        self._token_manager = token_manager
         self._client = httpx.AsyncClient(timeout=settings.timeout_seconds)
 
     @property
@@ -50,6 +56,12 @@ class CustomSTTAdapter(stt.STT):
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+    async def _auth_headers(self) -> dict[str, str]:
+        if self._token_manager is not None:
+            token = await self._token_manager.get_token()
+            return {"Authorization": f"Bearer {token}"}
+        return _bearer_headers(self.settings)
 
     async def _recognize_impl(
         self,
@@ -87,7 +99,7 @@ class CustomSTTAdapter(stt.STT):
                 _transcribe_url(self.settings.url, self._provider_key),
                 data=data,
                 files=files,
-                headers=_bearer_headers(self.settings),
+                headers=await self._auth_headers(),
             )
             response.raise_for_status()
             metrics.STT_DURATION.observe(time.monotonic() - t0)
@@ -123,7 +135,7 @@ class CustomSTTAdapter(stt.STT):
         return STTResult(
             text=text.strip(),
             request_id=resolved_request_id,
-            language=payload.get("language", self.settings.language),
+            language=payload.get("identified_language") or payload.get("language") or self.settings.language,
         )
 
 

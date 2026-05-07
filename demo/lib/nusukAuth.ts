@@ -33,7 +33,7 @@ async function fetchFreshToken(): Promise<CachedToken> {
   const response = await fetch(`${baseUrl.replace(/\/$/, '')}/auth/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ client_id: clientId, client_secret: clientSecret }),
+    body: JSON.stringify({ client_id: clientId, client_secret: clientSecret, user_id: clientId }),
   });
   if (!response.ok) {
     throw new Error(`Nusuk auth failed: ${response.status} ${await response.text()}`);

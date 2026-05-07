@@ -119,7 +119,6 @@ class CustomLLMStream(llm.LLMStream):
             "model": self._provider.settings.model,
             "messages": messages,
             "stream": True,
-            "reasoning_effort": "none",
             "temperature": self._provider.settings.temperature,
             "max_tokens": self._provider.settings.max_tokens,
         }
@@ -127,8 +126,6 @@ class CustomLLMStream(llm.LLMStream):
         request_id = str(uuid.uuid4())
         reasoning_filter = ReasoningStreamFilter()
         provider_name = self._provider.settings.provider
-        output_parts: list[str] = []
-        ttft_s: float | None = None
 
         logger.info("llm_start provider=%s", provider_name)
         t0 = time.monotonic()
@@ -150,10 +147,8 @@ class CustomLLMStream(llm.LLMStream):
                     if not filtered:
                         continue
                     if first_token:
-                        ttft_s = time.monotonic() - t0
-                        metrics.LLM_TTFT.observe(ttft_s)
+                        metrics.LLM_TTFT.observe(time.monotonic() - t0)
                         first_token = False
-                    output_parts.append(filtered)
                     self._event_ch.send_nowait(
                         llm.ChatChunk(
                             id=request_id,
@@ -180,6 +175,7 @@ class CustomLLMStream(llm.LLMStream):
             "query": query,
             "session_id": self._provider.session_id,
             "language": self._provider.settings.language,
+            "mode": "voice",
             "include_metadata": self._provider.settings.include_metadata,
             "tool": self._provider.settings.tool,
         }
@@ -188,8 +184,6 @@ class CustomLLMStream(llm.LLMStream):
 
         request_id = str(uuid.uuid4())
         provider_name = self._provider.settings.provider
-        output_parts: list[str] = []
-        ttft_s: float | None = None
 
         logger.info(
             "llm_start provider=%s session_id=%s query_len=%d",
@@ -220,10 +214,8 @@ class CustomLLMStream(llm.LLMStream):
                         if not isinstance(delta, str) or not delta:
                             continue
                         if first_token:
-                            ttft_s = time.monotonic() - t0
-                            metrics.LLM_TTFT.observe(ttft_s)
+                            metrics.LLM_TTFT.observe(time.monotonic() - t0)
                             first_token = False
-                        output_parts.append(delta)
                         self._event_ch.send_nowait(
                             llm.ChatChunk(
                                 id=request_id,

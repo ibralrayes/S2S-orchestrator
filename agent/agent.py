@@ -6,7 +6,7 @@ import os
 
 import httpx
 from livekit import agents, rtc
-from livekit.agents import Agent, AgentServer, AgentSession, JobContext, cli, llm, stt
+from livekit.agents import NOT_GIVEN, Agent, AgentServer, AgentSession, JobContext, cli, llm, stt
 from livekit.agents.voice import room_io
 from livekit.plugins import silero
 
@@ -105,10 +105,9 @@ def _build_room_options(
             sync_transcription=False,    # don't gate text output on audio timing
             transcription_speed_factor=1.0,
         ),
+        participant_identity=agent_settings.participant_identity or NOT_GIVEN,
         close_on_disconnect=agent_settings.close_on_disconnect,
         delete_room_on_close=agent_settings.delete_room_on_close,
-        **({"participant_identity": agent_settings.participant_identity}
-           if agent_settings.participant_identity else {}),
     )
 
 
@@ -275,7 +274,10 @@ async def entrypoint(ctx: JobContext) -> None:
     metrics.ACTIVE_SESSIONS.inc()
 
     user_id = _resolve_user_identity(ctx, agent_settings)
-    stt_adapter = CustomSTTAdapter(stt_settings)
+    stt_adapter = CustomSTTAdapter(
+        stt_settings,
+        token_manager=ctx.proc.userdata.get("nusuk_token_manager"),
+    )
     llm_provider = CustomLLM(
         llm_settings,
         agent_settings,
@@ -283,7 +285,10 @@ async def entrypoint(ctx: JobContext) -> None:
         user_id=user_id,
         token_manager=ctx.proc.userdata.get("nusuk_token_manager"),
     )
-    tts_provider = CustomTTS(tts_settings)
+    tts_provider = CustomTTS(
+        tts_settings,
+        token_manager=ctx.proc.userdata.get("nusuk_token_manager"),
+    )
 
     if agent_settings.explicit_eos_mode:
         try:
