@@ -4,6 +4,19 @@ Ongoing record of significant changes, decisions, and findings. Most recent firs
 
 ---
 
+## 2026-05-07
+
+### STT and TTS switched to Nusuk
+`CUSTOM_STT_URL` and `CUSTOM_STT_PROVIDER` updated to point at `https://dev.nusukai.com` using the `nusuk` provider. STT now calls `/transcribe` (multipart WAV, 16 kHz) instead of the local ASR container at port 8102. TTS now calls `/synthesize` (JSON `{text}`) instead of the local TTS wrapper at port 8000. Both adapters now accept and use the shared `NusukTokenManager` from `prewarm()` — previously the token manager was only passed to the LLM adapter. Auth headers are fetched dynamically via `_auth_headers()` in both `CustomSTTAdapter` and `CustomTTS`.
+
+### Added `mode: "voice"` to Nusuk LLM payload
+`_run_nusuk()` now includes `"mode": "voice"` in the POST body. Nusuk uses this to return shorter, spoken-style responses rather than detailed text answers.
+
+### Fixed `nusukAuth.ts` missing `user_id`
+The Nusuk `/auth/token` call in `demo/lib/nusukAuth.ts` was missing the required `user_id` field. Added `user_id: clientId` to the request body.
+
+---
+
 ## 2026-05-03
 
 ### Removed Langfuse — Prometheus + Grafana only
@@ -157,7 +170,7 @@ README updated with:
 Nusuk does not honor the `system_prompt` field. Response style is controlled by prepending a query prefix to every user message. This is a workaround, not a feature. If Nusuk adds system prompt support, remove `CUSTOM_LLM_QUERY_PREFIX` and use `AGENT_SYSTEM_PROMPT` directly.
 
 ### Room I/O defaults are hard-coded
-Audio input (24 kHz mono, 50 ms frames, pre-connect audio) is hard-coded in `agent.py` rather than exposed as env vars. These values are stable and don't need per-deployment tuning. Changing them requires a code edit and image rebuild.
+Audio input (16 kHz mono, 50 ms frames, pre-connect audio) is hard-coded in `agent.py` rather than exposed as env vars. These values are stable and don't need per-deployment tuning. Changing them requires a code edit and image rebuild.
 
 ### VAD is always on
 Silero VAD is preloaded in `prewarm()` and passed to both `stt.StreamAdapter` and `AgentSession`. There is no env var to disable it — disabling VAD would break the streaming STT interface the SDK expects. Turn *detection* (when to commit a turn) is separate from VAD (when speech is present).

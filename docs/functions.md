@@ -133,7 +133,7 @@ Returns the cached JWT if it is still valid (more than 60 s before expiry). Othe
 Clears the cached token under the lock. Called after a 401 from the Nusuk API so the next `get_token()` forces a fresh fetch.
 
 ### `NusukTokenManager._refresh()`
-POSTs `{client_id, client_secret}` to `{base_url}/auth/token`. Stores `access_token` and decodes the JWT expiry via `_jwt_expiry()`. Falls back to `_DEFAULT_TOKEN_TTL = 3600` s if expiry cannot be decoded. Raises `NusukAuthError` on network or HTTP errors.
+POSTs `{client_id, client_secret, user_id}` to `{base_url}/auth/token`. `user_id` defaults to `client_id` when not set explicitly. Stores `access_token` and decodes the JWT expiry via `_jwt_expiry()`. Falls back to `_DEFAULT_TOKEN_TTL = 3600` s if expiry cannot be decoded. Raises `NusukAuthError` on network or HTTP errors.
 
 ### `_jwt_expiry(token) → float | None`
 Decodes the JWT payload (base64url, no signature verification) and returns the `exp` claim as a Unix timestamp. Returns `None` on any decode error.
@@ -165,12 +165,13 @@ Parses a WAV file using the standard `wave` module and returns the audio paramet
 
 ### `_tts_url(url, provider) → str`
 Returns the final POST URL:
+- `nusuk`: appends `/synthesize` if not already present
 - `wrapper`: base URL as-is (POST to `/`)
 - `local_api`: normalizes to `{base}/api/synthesize/`
 - other: base URL as-is
 
 ### `_request_payload(settings, text, provider) → dict`
 Returns the JSON body:
-- `wrapper`: `{"text": text}`
+- `nusuk` / `wrapper`: `{"text": text}`
 - `local_api`: `{"text", "output_format", "sample_rate"}`
 - generic/other: `{"model", "voice", "input", "response_format"}`

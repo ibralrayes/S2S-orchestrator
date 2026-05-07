@@ -36,11 +36,13 @@ Modular pipeline driven by a hold-to-talk button. The browser records audio, the
 
 ## External Services (not in this repo)
 
-| Service | URL (default) | Protocol |
+All three AI services are hosted by Nusuk at `https://dev.nusukai.com`. All require a JWT obtained from `/auth/token`.
+
+| Service | Endpoint | Protocol |
 |---|---|---|
-| ASR | `http://host.docker.internal:8102` | `POST /api/transcribe/` multipart WAV |
-| TTS (wrapper) | `http://host.docker.internal:8000` | `POST /` JSON `{text}` → WAV |
-| Nusuk LLM | `https://dev.nusukai.com` | `POST /chat/stream` SSE |
+| STT | `POST /transcribe` | multipart WAV (16 kHz) → `{transcription_text, language}` |
+| LLM | `POST /chat/stream` | JSON `{query, session_id, mode, ...}` → SSE `{delta}` |
+| TTS | `POST /synthesize` | JSON `{text}` → WAV (24 kHz) |
 
 ## Key Design Decisions
 

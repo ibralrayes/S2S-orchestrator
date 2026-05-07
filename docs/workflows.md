@@ -15,7 +15,7 @@ AgentSession (VAD listener)
     ▼
 stt.StreamAdapter._recognize_impl(buffer)
     │  → frames_to_wav_bytes(): merge frames → WAV (resample guard is no-op, input already 16 kHz)
-    │  → POST /api/transcribe/ (multipart, Bearer auth)
+    │  → POST https://dev.nusukai.com/transcribe (multipart, Bearer JWT from NusukTokenManager)
     │  ← {transcription_text, language}
     ▼
 AgentSession receives final transcript
@@ -34,8 +34,8 @@ CustomLLMStream._run_nusuk()
     ▼
 CustomTTSChunkedStream._run()
     │  → _strip_markdown() on the sentence text
-    │  → POST / (wrapper provider) body {"text": "..."}
-    │  ← WAV bytes
+    │  → POST https://dev.nusukai.com/synthesize body {"text": "..."}  (Bearer JWT)
+    │  ← WAV bytes (24 kHz)
     │  → _decode_wav(): extract PCM, sample_rate, channels
     │  → output_emitter.initialize() + output_emitter.push(pcm)
     ▼
