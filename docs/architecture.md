@@ -101,16 +101,78 @@ Browser (WebRTC)
 ## Machine Split (Recommended for Production)
 
 ```
-CPU Machine                         GPU Machine
-───────────────────────────         ──────────────────────────
-livekit-server                      ASR   (port 8102)
-agent workers                       TTS   (port 8000)
-token-server                        LLM   (Nusuk, external)
+CPU Machine
+───────────────────────────────────────────
+livekit-server
+agent workers
+token-server
 redis
 demo-frontend (optional)
+
+External (Nusuk — https://dev.nusukai.com)
+───────────────────────────────────────────
+STT   POST /transcribe
+LLM   POST /chat/stream
+TTS   POST /synthesize
 ```
 
-The agent makes only HTTP calls to ASR and TTS. No code changes needed for this split — only `.env` URL updates. See [troubleshooting.md](troubleshooting.md#livekit-public-ip) for the public IP requirement.
+All AI inference is handled by the Nusuk external API. No GPU machine is needed in this repo. See [troubleshooting.md](troubleshooting.md#livekit-public-ip) for the public IP requirement.
+
+## GKE Sizing (Middle East Regions)
+
+This repo is **orchestration-only** — no GPU inference. The binding resources are:
+- **RAM**: each Python agent worker loads PyTorch + Silero VAD once (~700–900 MB fixed per process, shared across 10 sessions via `AGENT_MAX_JOBS_PER_WORKER`)
+- **CPU**: Silero VAD runs ~1–3 ms inference per 50 ms audio frame → ~0.03–0.07 vCPU per concurrent session on average (sessions are ~85% I/O-idle waiting on Nusuk API)
+
+**Recommended VM family: `n2d-standard-*`** (General Purpose, AMD EPYC, 8 GB/vCPU).
+No GPU needed. C2/C3 compute-optimized is overkill for 1:1 audio rooms. Memory-optimized (M-series) is unnecessary.
+
+### Node pool layout
+
+LiveKit requires host networking — only **one pod per node**. Use two node pools:
+
+```
+Node Pool: "livekit"  (1–2 nodes, fixed)
+  n2d-standard-4  →  livekit-server + redis
+  Handles hundreds of 1:1 audio rooms; SFU is not the bottleneck here.
+
+Node Pool: "agent"  (autoscales)
+  n2d-standard-8  →  agent pods + token-server
+  Each node: ~8 agent pods × 10 sessions = ~80 concurrent sessions
+  HPA trigger: agent_active_sessions_total (Prometheus, port 9090)
+```
+
+### Sessions per node (n2d-standard, me-central2 Dammam)
+
+| VM Type | vCPU | RAM | Concurrent Sessions | $/hr | $/month |
+|---|---|---|---|---|---|
+| `n2d-standard-2` | 2 | 8 GB | 10–15 | $0.135 | $99 |
+| `n2d-standard-4` | 4 | 16 GB | 30–40 | $0.270 | $197 |
+| `n2d-standard-8` | 8 | 32 GB | 70–90 | $0.541 | $395 |
+| `n2d-standard-16` | 16 | 64 GB | 140–180 | $1.082 | $789 |
+| `n2d-standard-32` | 32 | 128 GB | 280–350 | $2.163 | $1,579 |
+
+### Cost per concurrent session (me-central2)
+
+Cost per session flattens after `n2d-standard-8` — no efficiency gain going larger. Scale horizontally instead.
+
+| VM Type | Sessions | $/month | $/session/month |
+|---|---|---|---|
+| `n2d-standard-4` | 35 | $197 | $5.63 |
+| `n2d-standard-8` | 80 | $395 | $4.94 |
+| `n2d-standard-16` | 160 | $789 | $4.93 |
+| `n2d-standard-32` | 315 | $1,579 | $5.01 |
+
+### Pod resource specs
+
+| Pod | CPU request | CPU limit | Memory request | Memory limit |
+|---|---|---|---|---|
+| `agent` | `800m` | `2000m` | `900Mi` | `1.5Gi` |
+| `livekit-server` | `1000m` | `4000m` | `512Mi` | `2Gi` |
+| `token-server` | `100m` | `500m` | `128Mi` | `256Mi` |
+| `redis` | `200m` | `500m` | `256Mi` | `512Mi` |
+
+Prices are on-demand (pay-as-you-go) as of May 2026. Apply 1-year committed use for ~37% discount on sustained production workloads.
 
 ## Configuration Entry Points
 
