@@ -40,7 +40,9 @@ _AGENT_PARTICIPANT_KIND = 4
 
 def prewarm(proc: agents.JobProcess) -> None:
     settings = AgentSettings()
+    stt_settings = STTSettings()
     llm_settings = LLMSettings()
+    tts_settings = TTSSettings()
 
     # Start Prometheus metrics HTTP server — once per worker process.
     metrics_port = int(os.getenv("AGENT_METRICS_PORT", "9090"))
@@ -52,16 +54,18 @@ def prewarm(proc: agents.JobProcess) -> None:
     )
 
     # Pre-fetch Nusuk JWT so the first room doesn't pay an auth RTT before
-    # its first LLM call. The token manager is shared across all sessions
-    # handled by this worker process.
-    if (
-        llm_settings.provider.strip().lower() == "nusuk"
-        and llm_settings.client_id
-        and llm_settings.client_secret
-    ):
+    # its first STT/LLM/TTS call. The token manager is shared across all
+    # sessions in this worker. Build it whenever ANY of the three providers
+    # is `nusuk`, since the LLM may be on a different provider (e.g. Groq)
+    # while STT/TTS still hit Nusuk.
+    nusuk_in_use = any(
+        s.provider.strip().lower() == "nusuk"
+        for s in (stt_settings, llm_settings, tts_settings)
+    )
+    if nusuk_in_use and llm_settings.client_id and llm_settings.client_secret:
         shared_http_client = httpx.AsyncClient(timeout=llm_settings.timeout_seconds)
         token_manager = NusukTokenManager(
-            base_url=llm_settings.url,
+            base_url=llm_settings.url if llm_settings.provider.strip().lower() == "nusuk" else stt_settings.url,
             client_id=llm_settings.client_id,
             client_secret=llm_settings.client_secret,
             user_id=llm_settings.auth_user_id,
