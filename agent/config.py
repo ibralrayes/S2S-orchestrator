@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from pydantic import AliasChoices, Field
+from pathlib import Path
+
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,7 +27,7 @@ class LLMSettings(BaseSettings):
     access_token: str | None = Field(
         default=None,
         description="Bearer token for the LLM API",
-        validation_alias=AliasChoices("CUSTOM_LLM_ACCESS_TOKEN", "GROQ"),
+        validation_alias=AliasChoices("CUSTOM_LLM_ACCESS_TOKEN", "GROQ_API_KEY", "GROQ"),
     )
     client_id: str | None = Field(
         default=None,
@@ -48,6 +50,10 @@ class LLMSettings(BaseSettings):
     tool: str = Field(default="Knowledge", description="Nusuk tool name")
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     max_tokens: int = Field(default=96, ge=1)
+    reasoning_effort: str | None = Field(
+        default=None,
+        description="Groq gpt-oss reasoning_effort: low/medium/high. Unset = provider default.",
+    )
     timeout_seconds: float = Field(default=60.0, ge=1)
 
 
@@ -72,12 +78,12 @@ class AgentSettings(BaseSettings):
     system_prompt: str = Field(
         default="أجب بالعربية في أقل من 40 كلمة، وحاول الإجابة مباشرة عن سؤال المستخدم."
     )
-    greeting: str = Field(
-        default="مرحبا، أنا مساعدك الصوتي. كيف أقدر أساعدك؟"
+    system_prompt_file: str | None = Field(
+        default=None,
+        description="Path to a file whose contents replace system_prompt at startup.",
     )
     explicit_eos_mode: bool = Field(default=False)
     explicit_eos_topic: str = Field(default="eval.eos")
-    use_turn_detector: bool = Field(default=False)
     vad_activation_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     allow_interruptions: bool = Field(default=True)
     discard_audio_if_uninterruptible: bool = Field(default=True)
@@ -92,3 +98,9 @@ class AgentSettings(BaseSettings):
     participant_identity: str | None = Field(default=None)
     close_on_disconnect: bool = Field(default=True)
     delete_room_on_close: bool = Field(default=False)
+
+    @model_validator(mode="after")
+    def _load_prompt_file(self) -> "AgentSettings":
+        if self.system_prompt_file:
+            self.system_prompt = Path(self.system_prompt_file).read_text(encoding="utf-8")
+        return self

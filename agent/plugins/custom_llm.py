@@ -122,6 +122,8 @@ class CustomLLMStream(llm.LLMStream):
             "temperature": self._provider.settings.temperature,
             "max_tokens": self._provider.settings.max_tokens,
         }
+        if self._provider.settings.reasoning_effort:
+            payload["reasoning_effort"] = self._provider.settings.reasoning_effort
 
         request_id = str(uuid.uuid4())
         reasoning_filter = ReasoningStreamFilter()
