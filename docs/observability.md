@@ -10,8 +10,20 @@ The agent exports `agent_*` metrics via `prometheus_client` (see `agent/metrics.
 
 | Metric prefix | Source | Exporter port |
 |---|---|---|
-| `agent_active_sessions_total`, `agent_stt_*`, `agent_llm_*`, `agent_tts_*` | `agent/metrics.py` | `:9090` |
+| `agent_active_sessions_total`, `agent_stt_*`, `agent_llm_*`, `agent_tts_*` | `agent/metrics.py` (per-stage HTTP wall time, recorded at request boundaries) | `:9090` |
+| `agent_turn_*` (e2e_latency, llm_node_ttft, tts_node_ttfb, transcription_delay, end_of_turn_delay) | `metrics.record_turn_metrics(session.history)` — invoked at session end; reads `ChatMessage.metrics` populated natively by the LiveKit SDK | `:9090` |
 | `livekit_*` (rooms, participants, bandwidth) | LiveKit server (`prometheus_port: 6789` in `livekit-server/livekit.yaml`) | `:6789` |
+
+### `agent_*` vs `agent_turn_*`
+
+Two complementary views:
+
+- **`agent_stt_*` / `agent_llm_*` / `agent_tts_*`** — measured by *us*, per HTTP request, observed inline. Captures wire-level wall time and HTTP errors. Useful for vendor-side debugging.
+- **`agent_turn_*`** — measured by the *SDK*, per turn, walked at session end. Same data the SDK exports through OpenTelemetry (`lk.agents.turn.*`), but routed through our multi-process Prometheus registry so all forked workers contribute. Useful for end-to-end user-perceived latency. `e2e_latency` is the headline number for "how fast does the agent reply after the user stops talking."
+
+### Why we did not adopt the OTel→Prometheus bridge
+
+LiveKit ships `livekit.agents.telemetry.otel_metrics` with pre-built OTel histograms. Wiring those through `opentelemetry-exporter-prometheus` would only emit data from the worker that wins the port-9090 bind race; the other forked workers' metrics would be silently dropped (the OTel SDK is not multi-process-aware in the way `prometheus_client` is). We therefore skipped the OTel SDK and instead read the same SDK-populated `MetricsReport` data into multiproc-safe Prometheus histograms with matching names.
 
 ## Bringing it up
 

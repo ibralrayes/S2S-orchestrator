@@ -6,6 +6,56 @@ Ongoing record of significant changes, decisions, and findings. Most recent firs
 
 ## 2026-05-07
 
+### Per-turn pipeline metrics from `ChatMessage.metrics` → Prometheus
+The LiveKit SDK populates a `MetricsReport` on every `ChatMessage` with `e2e_latency`, `llm_node_ttft`, `tts_node_ttfb`, `transcription_delay`, `end_of_turn_delay`. These are the same data points the SDK exports through OpenTelemetry (`lk.agents.turn.*`). Added five matching Prometheus histograms in `agent/metrics.py` (`agent_turn_e2e_latency_seconds`, `agent_turn_llm_node_ttft_seconds`, `agent_turn_tts_node_ttfb_seconds`, `agent_turn_transcription_delay_seconds`, `agent_turn_end_of_turn_delay_seconds`) and a `record_turn_metrics(history)` helper that walks `session.history` and observes them. Called from the `entrypoint` `finally` block at session end. Skipped the OTel→Prom bridge because `opentelemetry-exporter-prometheus` is not multi-process-aware — only the worker bound to port 9090 would emit; other forked workers' samples would silently disappear. Reading the SDK's data structure directly into `prometheus_client` multiproc histograms keeps all workers' samples aggregated correctly and uses our existing dashboards.
+
+### Enabled `preemptive_tts=True`
+Set `turn_handling={"preemptive_generation": {"preemptive_tts": True}}` on `AgentSession`. The SDK already runs the LLM speculatively during the endpointing-delay window (this is on by default); flipping `preemptive_tts` makes TTS also fire speculatively as soon as sentence 1 of the speculative LLM stream is ready. If the user keeps talking (false turn-end), the in-flight LLM+TTS calls are cancelled. Capped at `max_retries=3` per turn, skipped for utterances `> max_speech_duration=10s`. Expected ~500–1000 ms TTFA win on confidently-detected short turns; cost is up to 3× speculative LLM/TTS calls per turn that get cancelled when speculation is wrong (rare when turn detection is well-tuned).
+
+### Streaming TTS: PCM pushed as it arrives
+`CustomTTSChunkedStream._run` now uses `httpx.stream("POST", …)` and pushes PCM chunks to the LiveKit `output_emitter` as they arrive, instead of awaiting the full WAV body. New `_parse_wav_header()` walks `RIFF`/`fmt `/`data` markers in the prefix buffer to extract sample rate and channel count without invoking the `wave` module on a partial stream. Added `ttfa_s` field to `tts_done` log line — time from request start to first PCM chunk hitting the emitter, vs. `duration_s` (full body received). Measured savings on first call: ~360 ms TTFA reduction per sentence. Bigger wins on long replies because Nusuk flushes per-sentence audio while later sentences are still rendering.
+
+### Shared `httpx.AsyncClient` across STT / LLM / TTS / Nusuk auth
+LiveKit's idiom is `utils.http_context.http_session()` — a process-scoped singleton — but it's `aiohttp` and would force us off HTTP/2 and our streaming TTS. Applied the same pattern with `httpx`: one `AsyncClient(http2=True, max_keepalive_connections=20, keepalive_expiry=120s)` built in `prewarm()` and stored in `proc.userdata["http_client"]`. Plugins accept it as a constructor arg and track `_owns_client` so they only close the client they created themselves (process-scoped lifetime; one warm TCP+TLS connection to `dev.nusukai.com` reused by all three plugins instead of three separate ones).
+
+### Enabled HTTP/2 on all `httpx.AsyncClient` instances
+Added `httpx[http2]` to `agent/requirements.txt` (pulls in `h2`). All four `AsyncClient` constructions now pass `http2=True`. Verified: `dev.nusukai.com` negotiates ALPN h2 (`HTTP/2 200`). Benefits: header compression on every request, stream multiplexing on a single socket — pays off when sentence-buffered TTS calls overlap or once we move to one-shot full-reply TTS.
+
+### Fixed Prometheus multi-process metrics
+The agent forks 5 worker processes; `prewarm()` ran `metrics.start_server(9090)` in each. Only the first worker won the bind; other workers' metric emissions went to private process memory and never reached the `/metrics` endpoint. Symptom: every Grafana panel was empty even after successful turns. Fix: enabled `prometheus_client` multi-process mode — set `PROMETHEUS_MULTIPROC_DIR=/tmp/prom_multiproc` (with a `tmpfs` mount in `docker-compose.yml`), updated `metrics.start_server` to register a `MultiProcessCollector`, set `multiprocess_mode="livesum"` on the active-sessions `Gauge`. Now every worker writes to its own `.db` file in the multiproc dir and the bound HTTP server aggregates them on scrape.
+
+### Fixed shared Nusuk token-manager gating
+`prewarm()` only built the shared `NusukTokenManager` when **LLM provider == nusuk**. After switching LLM to Groq, the manager was no longer created — but STT and TTS still hit `dev.nusukai.com`, fired without `Authorization: Bearer …`, and Nusuk returned `422` to every transcribe call. Symptom: ASR worked once, then every subsequent turn returned no response. Fix: gate now triggers when **any** of STT/LLM/TTS is `nusuk`. Same client_id/secret pair used; nothing else changed.
+
+### LLM temporarily switched to Groq (`openai/gpt-oss-120b`)
+Nusuk `/chat/stream` is broken upstream (`GenericRAG.stream_search() got an unexpected keyword argument 'prompt_key'` → 500/403). Switched LLM provider to Groq via the existing OpenAI-compatible path (`_run_openai`). `.env` now sets `CUSTOM_LLM_URL=https://api.groq.com/openai/v1`, `CUSTOM_LLM_PROVIDER=openai`, `CUSTOM_LLM_MODEL=openai/gpt-oss-120b`. `CUSTOM_LLM_MAX_TOKENS` raised 96 → 768 because `gpt-oss-120b` is a reasoning model and reasoning tokens consume the budget before any visible content is emitted. Added `GROQ_API_KEY` to `LLMSettings.access_token` `AliasChoices`. Nusuk credentials kept in `.env` so the swap back is one-line when `/chat/stream` is restored.
+
+### Added `CUSTOM_LLM_REASONING_EFFORT`
+New optional field on `LLMSettings`. When set, `_run_openai` injects `reasoning_effort` in the payload (Groq `gpt-oss-*` accepts `low|medium|high`). Production `.env` uses `low`: collapsed reasoning trace from ~78 tokens → ~7 tokens, dropped TTFT measurably without hurting reply quality. Field is opt-in — unset means provider default and no key sent (safe with non-reasoning models).
+
+### Added `AGENT_SYSTEM_PROMPT_FILE` (file-based system prompt loader)
+Long system prompts (e.g. the full Nusuk RAG prompt at ~24 KB) don't fit cleanly in `.env` because `env_file` parsing is line-oriented. Added a `system_prompt_file: str | None` field on `AgentSettings` plus a `model_validator(mode="after")` that, when set, replaces `system_prompt` with `Path(...).read_text(encoding="utf-8")`. Inline `AGENT_SYSTEM_PROMPT` still works when set; the file path takes precedence. Current deployment uses `AGENT_SYSTEM_PROMPT_FILE=/app/system_prompt_rag.txt` populated from the `RAG_VOICE` entry in `prompts.json`.
+
+### LLM provider benchmark — Groq vs OpenAI (RAG_VOICE prompt, ~916 B)
+Same 6 Arabic queries, post-warmup, `max_completion_tokens=768`. Streaming TTFT measured to first content delta (reasoning deltas excluded since the agent ignores them).
+
+| Model | TTFT median | TTLT median | Generation throughput | Notes |
+|---|---|---|---|---|
+| Groq `openai/gpt-oss-120b` (`reasoning_effort=low`, `T=0.2`) | **422 ms** | **483 ms** | ~1347 ch/s | Current production choice |
+| OpenAI `gpt-5.3-chat-latest` (non-reasoning, `T=1` forced default) | 1765 ms | 2220 ms | ~234 ch/s | Does not accept `temperature` or `max_tokens` |
+| OpenAI `gpt-5.4-mini-2026-03-17` (`reasoning_effort=low`) | 1676 ms | 1932 ms | ~383 ch/s | Cold-cache outlier observed (5.2 s TTFT once) |
+
+**Headlines:**
+- Groq is ~4× faster on TTFT and ~3.5–5.7× faster on throughput than either OpenAI model.
+- Groq's full reply (TTLT ~480 ms) lands before OpenAI starts streaming (~1700 ms TTFT).
+- For real-time voice, Groq remains the right call. Switching to OpenAI adds ~1.3 s to end-to-end TTFA.
+
+**Voice-pipeline TTFA budget (user speech end → first audio):** STT (~1.5 s on a typical utterance) + LLM TTFT (~0.4 s on Groq) + sentence buffer (~0.3 s) + TTS first-audio (~0.6–1.3 s) ≈ **2.5–3.5 s**. Same query through OpenAI lands at ~3.8–4.8 s.
+
+**RAG vs RAG_VOICE prompt:** With the full RAG prompt (24,260 chars / ~8k tokens), TTFT on Groq median was 1086 ms (range 794–1311 ms). Switching to RAG_VOICE (916 chars) cut TTFT 61% and removed `<PAGE_ID>` placeholder emission entirely (RAG_VOICE explicitly forbids them — important because `_strip_markdown` does not strip those tags, so they would otherwise be spoken by TTS).
+
+**Reproducibility:** All three models refused to fabricate ("ما عندي معلومات…") since RAG_VOICE instructs grounding-only and no retrieved context is wired into the prompt yet. Quality comparison requires the RAG context plumbed in — only latency was meaningfully comparable in this run.
+
 ### STT and TTS switched to Nusuk
 `CUSTOM_STT_URL` and `CUSTOM_STT_PROVIDER` updated to point at `https://dev.nusukai.com` using the `nusuk` provider. STT now calls `/transcribe` (multipart WAV, 16 kHz) instead of the local ASR container at port 8102. TTS now calls `/synthesize` (JSON `{text}`) instead of the local TTS wrapper at port 8000. Both adapters now accept and use the shared `NusukTokenManager` from `prewarm()` — previously the token manager was only passed to the LLM adapter. Auth headers are fetched dynamically via `_auth_headers()` in both `CustomSTTAdapter` and `CustomTTS`.
 

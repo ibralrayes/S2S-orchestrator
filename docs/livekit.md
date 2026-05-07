@@ -173,6 +173,56 @@ token = (
 
 The Next.js demo token route (`/api/token`) does the same thing with the TypeScript SDK.
 
+## SDK Features We Already Use
+
+| Feature | Where | Why |
+|---|---|---|
+| `AgentServer.setup_fnc = prewarm` | [agent/agent.py](../agent/agent.py) | One-shot per-worker init: VAD load, JWT prefetch, shared httpx client, multiproc Prom dir |
+| `proc.userdata` for cross-session state | prewarm + entrypoint | Holds VAD instance, shared `httpx.AsyncClient`, `NusukTokenManager` — sessions on the same worker reuse them |
+| `stt.StreamAdapter(stt=..., vad=...)` | entrypoint | Wraps non-streaming STT with VAD-segmented streaming interface |
+| Sentence-buffered LLM → TTS | AgentSession default | TTS for sentence 1 fires before LLM finishes streaming sentence 2 |
+| Pre-emptive generation (LLM) | AgentSession default | Logs `using preemptive generation` — LLM kicks off before turn-end is fully confirmed |
+| `MultilingualModel` turn detector | entrypoint (optional dep) | Semantic end-of-turn; falls back to VAD when language is unsupported (e.g. `ar`) |
+| Prometheus multiprocess metrics | [agent/metrics.py](../agent/metrics.py) | `MultiProcessCollector` aggregates samples from all forked workers — see `docs/observability.md` |
+| Hard-coded 16 kHz mono input | `_build_room_options` | Matches Silero VAD native rate + Nusuk ASR target → no resample on hot path |
+
+## SDK Features Worth Adopting (Not Yet Used)
+
+Surveyed `/usr/local/lib/python3.11/site-packages/livekit/agents/` 2026-05-07. Top candidates ranked by ROI for our voice pipeline.
+
+### High ROI (small effort)
+
+| Feature | Source | Benefit | Effort | Caveat |
+|---|---|---|---|---|
+| **Pre-emptive TTS** | `voice/agent_session.py` `PreemptiveGenerationOptions(preemptive_tts=True)` | Speculative TTS during turn-end ambiguity → ~500–1000 ms TTFA on short turns | S | Wastes TTS calls if speculation is wrong; capped by `max_retries` |
+| **OTel native metrics** | `telemetry/otel_metrics.py` | Pre-built histograms for LLM TTFT, TTS TTFB, transcription delay, connection-acquire — drop-in replacement for parts of our custom Prometheus | S | Coexists with our Prom; consider exporting both, or migrate gradually |
+| **`utils.connection_pool.ConnectionPool`** | `utils/connection_pool.py` | Generic pool primitive (not just HTTP) with `prewarm`, `max_session_duration`, background recycling | S | Useful if we ever switch STT/TTS to WebSocket — pool socket sessions across turns |
+
+### Medium ROI
+
+| Feature | Source | Benefit | Effort | Caveat |
+|---|---|---|---|---|
+| **`tts.FallbackAdapter([primary, backup])`** | `tts/fallback_adapter.py` | Auto-failover with non-blocking recovery probes; emits `tts_availability_changed` events | M | Need a real backup TTS (currently we only have Nusuk); set `availability_check_interval` to avoid hammering primary on outages |
+| **`stt.FallbackAdapter`** | `stt/fallback_adapter.py` | Same idea for STT — primary Nusuk + backup if/when an alternative ASR is integrated | M | Same: need a real backup |
+| **OTel trace export** | `telemetry/trace_types.py` + `telemetry/utils.py` | Distributed traces for STT/LLM/TTS spans → Jaeger/Datadog correlation with Prom histograms | M | Requires OTLP collector; adds env vars |
+| **`tts.SentenceStreamPacer`** | `tts/stream_pacer.py` | Buffers tokens and flushes based on remaining playback (`min_remaining_audio`, `max_text_length`) | S | Refines our sentence buffering — useful if we move to single-call full-reply TTS |
+
+### Worth Knowing
+
+| Feature | Source | When it matters |
+|---|---|---|
+| **Adaptive interruption detector** | `inference/interruption.py` | ML-based overlap classifier — replaces VAD-only interrupt detection. Set `turn_handling.interruption.mode="adaptive"`. Reduces false interrupts when user makes backchannel sounds ("uh-huh", "نعم") |
+| **AMD (answering machine detection)** | `inference/` | If you ever do outbound calling — classifies callee as human/silence/machine in first 5 s, lets you skip LLM if a machine picks up |
+| **`AgentSession.session_close_transcript_timeout`** | constructor | Wait up to N s after session ends to capture trailing transcript for logging. Useful for post-call analytics |
+| **Worker `load_fnc`** | `worker.py` | Already used (`server.load_fnc = ...`); LiveKit honours `load_threshold=0.8` to stop dispatching new jobs |
+| **`evals/` framework** | `evals/` | Built-in eval scaffolding — could replace our `eval/compare.py` if we standardize |
+
+### Top 3 to Do Next
+
+1. **Pre-emptive TTS** — flip `preemptive_tts=True` in AgentSession config. Free TTFA win, no architecture change.
+2. **OTel metrics** — already have a Prometheus dashboard; OTel histograms would add `connection_reused`, `transcription_delay`, and per-turn E2E timing without us writing the code.
+3. **STT/TTS FallbackAdapter** — only worth it once we have a second backend (e.g. fallback to a local Whisper or Edge-TTS). Architecturally important for production uptime.
+
 ## Room Events Used
 
 ```python

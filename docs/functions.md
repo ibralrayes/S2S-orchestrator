@@ -99,7 +99,7 @@ LiveKit SDK entry point. Drops unused SDK arguments (`parallel_tool_calls`, `too
 Dispatches to `_run_nusuk()` or `_run_openai()` based on `_provider_key`.
 
 ### `CustomLLMStream._run_openai()`
-OpenAI-compatible SSE stream. Injects a system message if the chat context doesn't have one. Filters `<think>` blocks via `ReasoningStreamFilter` before emitting `ChatChunk` events. Useful for Groq, OpenAI, and compatible endpoints.
+OpenAI-compatible SSE stream. Injects a system message if the chat context doesn't have one. If `settings.reasoning_effort` is set, includes it in the payload (Groq `gpt-oss-*` accepts `low|medium|high`; non-reasoning models will reject it, so the field is opt-in). Reads only `choices[0].delta.content`, ignoring any `delta.reasoning` / `delta.reasoning_content` fields that reasoning models stream alongside — chain-of-thought never reaches TTS. Filters legacy inline `<think>` blocks via `ReasoningStreamFilter` before emitting `ChatChunk` events. Used for Groq, OpenAI, and compatible endpoints.
 
 ### `CustomLLMStream._run_nusuk()`
 Nusuk SSE stream. Extracts the latest user message, prepends `query_prefix` if set, POSTs to `/chat/stream`. On a 401 response (first attempt only), calls `token_manager.invalidate()` and retries. Delta tokens arrive in `event["delta"]` — no `choices` nesting.
