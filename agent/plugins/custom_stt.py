@@ -33,6 +33,7 @@ class CustomSTTAdapter(stt.STT):
         self,
         settings: STTSettings,
         token_manager: NusukTokenManager | None = None,
+        client: httpx.AsyncClient | None = None,
     ) -> None:
         super().__init__(
             capabilities=stt.STTCapabilities(
@@ -44,7 +45,12 @@ class CustomSTTAdapter(stt.STT):
         self.settings = settings
         self._provider_key = settings.provider.strip().lower()
         self._token_manager = token_manager
-        self._client = httpx.AsyncClient(timeout=settings.timeout_seconds)
+        if client is not None:
+            self._client = client
+            self._owns_client = False
+        else:
+            self._client = httpx.AsyncClient(timeout=settings.timeout_seconds, http2=True)
+            self._owns_client = True
 
     @property
     def model(self) -> str:
@@ -55,7 +61,8 @@ class CustomSTTAdapter(stt.STT):
         return self.settings.provider
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        if self._owns_client:
+            await self._client.aclose()
 
     async def _auth_headers(self) -> dict[str, str]:
         if self._token_manager is not None:

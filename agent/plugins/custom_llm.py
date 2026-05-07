@@ -27,6 +27,7 @@ class CustomLLM(llm.LLM):
         session_id: str,
         user_id: str | None = None,
         token_manager: NusukTokenManager | None = None,
+        client: httpx.AsyncClient | None = None,
     ) -> None:
         super().__init__()
         self.settings = settings
@@ -34,7 +35,12 @@ class CustomLLM(llm.LLM):
         self.session_id = session_id
         self.user_id = user_id
         self._provider_key = settings.provider.strip().lower()
-        self._client = httpx.AsyncClient(timeout=settings.timeout_seconds)
+        if client is not None:
+            self._client = client
+            self._owns_client = False
+        else:
+            self._client = httpx.AsyncClient(timeout=settings.timeout_seconds, http2=True)
+            self._owns_client = True
 
         # Prefer a pre-warmed token manager passed from prewarm() — avoids one
         # extra auth RTT on the first turn of each room.
@@ -78,7 +84,8 @@ class CustomLLM(llm.LLM):
         )
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        if self._owns_client:
+            await self._client.aclose()
 
 
 class CustomLLMStream(llm.LLMStream):

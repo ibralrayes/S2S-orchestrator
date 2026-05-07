@@ -53,17 +53,26 @@ def prewarm(proc: agents.JobProcess) -> None:
         activation_threshold=settings.vad_activation_threshold
     )
 
+    # Single process-scoped HTTP client shared by STT, LLM, TTS and the Nusuk
+    # token manager. httpx pools per-host, so one client serves dev.nusukai.com
+    # (STT/TTS) AND api.groq.com (LLM) simultaneously without cross-talk.
+    # Sharing collapses 3 separate TLS handshakes into 1, and any prewarm RTT
+    # (e.g. the JWT fetch below) already heats the keep-alive pool.
+    shared_http_client = httpx.AsyncClient(
+        timeout=llm_settings.timeout_seconds,
+        http2=True,
+        limits=httpx.Limits(max_keepalive_connections=20, keepalive_expiry=120.0),
+    )
+    proc.userdata["http_client"] = shared_http_client
+
     # Pre-fetch Nusuk JWT so the first room doesn't pay an auth RTT before
-    # its first STT/LLM/TTS call. The token manager is shared across all
-    # sessions in this worker. Build it whenever ANY of the three providers
-    # is `nusuk`, since the LLM may be on a different provider (e.g. Groq)
-    # while STT/TTS still hit Nusuk.
+    # its first STT/LLM/TTS call. Reuses the shared client → the resulting
+    # warm TLS connection to dev.nusukai.com is what STT/TTS hit on turn 1.
     nusuk_in_use = any(
         s.provider.strip().lower() == "nusuk"
         for s in (stt_settings, llm_settings, tts_settings)
     )
     if nusuk_in_use and llm_settings.client_id and llm_settings.client_secret:
-        shared_http_client = httpx.AsyncClient(timeout=llm_settings.timeout_seconds)
         token_manager = NusukTokenManager(
             base_url=llm_settings.url if llm_settings.provider.strip().lower() == "nusuk" else stt_settings.url,
             client_id=llm_settings.client_id,
@@ -278,20 +287,25 @@ async def entrypoint(ctx: JobContext) -> None:
     metrics.ACTIVE_SESSIONS.inc()
 
     user_id = _resolve_user_identity(ctx, agent_settings)
+    shared_client = ctx.proc.userdata.get("http_client")
+    token_manager = ctx.proc.userdata.get("nusuk_token_manager")
     stt_adapter = CustomSTTAdapter(
         stt_settings,
-        token_manager=ctx.proc.userdata.get("nusuk_token_manager"),
+        token_manager=token_manager,
+        client=shared_client,
     )
     llm_provider = CustomLLM(
         llm_settings,
         agent_settings,
         session_id=ctx.room.name,
         user_id=user_id,
-        token_manager=ctx.proc.userdata.get("nusuk_token_manager"),
+        token_manager=token_manager,
+        client=shared_client,
     )
     tts_provider = CustomTTS(
         tts_settings,
-        token_manager=ctx.proc.userdata.get("nusuk_token_manager"),
+        token_manager=token_manager,
+        client=shared_client,
     )
 
     if agent_settings.explicit_eos_mode:
@@ -320,6 +334,15 @@ async def entrypoint(ctx: JobContext) -> None:
         tts=tts_provider,            # text-to-speech pipeline
         vad=ctx.proc.userdata["vad"],  # voice activity detector (preloaded in prewarm)
         turn_detection=turn_detection,  # semantic end-of-turn model; None = VAD-only
+        # Speculative TTS during the endpointing-delay window: as soon as the
+        # LLM emits sentence 1 (which itself runs preemptively by default),
+        # fire TTS too. If the user keeps talking (false turn-end), the
+        # speculative LLM+TTS calls are cancelled. Capped at max_retries=3
+        # per turn and skipped for utterances >max_speech_duration=10s.
+        # Saves ~500–1000 ms TTFA on confidently-detected short turns.
+        turn_handling={
+            "preemptive_generation": {"preemptive_tts": True},
+        },
         # ── Interruption handling ──────────────────────────────────────────────
         allow_interruptions=agent_settings.allow_interruptions,
         # whether to discard buffered TTS audio when the user interrupts
@@ -378,6 +401,13 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.info("room=%s stage=session_ready", ctx.room.name)
         await disconnected.wait()
     finally:
+        # Walk session.history once and emit per-turn latencies (e2e, llm_ttft,
+        # tts_ttfb, transcription_delay, end_of_turn_delay) into our Prom
+        # histograms. The SDK populates ChatMessage.metrics as turns happen.
+        try:
+            metrics.record_turn_metrics(session.history)
+        except Exception:
+            logger.warning("record_turn_metrics failed", exc_info=True)
         metrics.ACTIVE_SESSIONS.dec()
         await streaming_stt.aclose()
         await _aclose_providers(stt_adapter, llm_provider, tts_provider)
